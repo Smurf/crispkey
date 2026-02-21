@@ -1,0 +1,65 @@
+defmodule Crispkey.Sync.Listener do
+  use GenServer
+
+  def start_link(_opts) do
+    GenServer.start_link(__MODULE__, [], name: __MODULE__)
+  end
+
+  def connect(host, port \\ nil) do
+    GenServer.call(__MODULE__, {:connect, host, port || Application.get_env(:crispkey, :sync_port, 4829)})
+  end
+
+  def sync_with(peer_id) do
+    GenServer.call(__MODULE__, {:sync_with, peer_id}, 60_000)
+  end
+
+  @impl true
+  def init([]) do
+    port = Application.get_env(:crispkey, :sync_port, 4829)
+    
+    {:ok, listen_socket} = :gen_tcp.listen(port, [
+      :binary,
+      {:active, false},
+      {:reuseaddr, true}
+    ])
+    
+    send(self(), :accept)
+    
+    {:ok, %{listen_socket: listen_socket, connections: %{}, port: port}}
+  end
+
+  @impl true
+  def handle_info(:accept, state) do
+    case :gen_tcp.accept(state.listen_socket, 0) do
+      {:ok, socket} ->
+        {:ok, _peer} = Crispkey.Sync.Peer.start(socket)
+        send(self(), :accept)
+        {:noreply, state}
+      
+      {:error, :timeout} ->
+        send(self(), :accept)
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:tcp_closed, _socket}, state) do
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_call({:connect, host, port}, _from, state) do
+    case :gen_tcp.connect(String.to_charlist(host), port, [:binary, {:active, false}], 5000) do
+      {:ok, socket} ->
+        {:ok, peer} = Crispkey.Sync.Peer.start(socket, is_client: true)
+        {:reply, {:ok, peer}, state}
+      
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:sync_with, peer_id}, _from, state) do
+    result = Crispkey.Sync.Peer.sync(peer_id)
+    {:reply, result, state}
+  end
+end

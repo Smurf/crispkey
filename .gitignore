@@ -1,0 +1,7 @@
+/_build
+/deps
+/erl_crash.dump
+*.ez
+/crispkey
+/.elixir_ls
+*.wrapped

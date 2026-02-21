@@ -32,7 +32,12 @@ defmodule Crispkey.Sync.Listener do
   def handle_info(:accept, state) do
     case :gen_tcp.accept(state.listen_socket, 0) do
       {:ok, socket} ->
-        {:ok, _peer} = Crispkey.Sync.Peer.start(socket)
+        case Crispkey.Sync.Peer.start(socket) do
+          {:ok, peer_pid} ->
+            :gen_tcp.controlling_process(socket, peer_pid)
+          _ ->
+            :ok
+        end
         send(self(), :accept)
         {:noreply, state}
       
@@ -42,7 +47,15 @@ defmodule Crispkey.Sync.Listener do
     end
   end
 
+  def handle_info({:tcp, _socket, _data}, state) do
+    {:noreply, state}
+  end
+
   def handle_info({:tcp_closed, _socket}, state) do
+    {:noreply, state}
+  end
+
+  def handle_info({:tcp_error, _socket, _reason}, state) do
     {:noreply, state}
   end
 
@@ -50,8 +63,14 @@ defmodule Crispkey.Sync.Listener do
   def handle_call({:connect, host, port}, _from, state) do
     case :gen_tcp.connect(String.to_charlist(host), port, [:binary, {:active, false}], 5000) do
       {:ok, socket} ->
-        {:ok, peer} = Crispkey.Sync.Peer.start(socket, is_client: true)
-        {:reply, {:ok, peer}, state}
+        case Crispkey.Sync.Peer.start(socket, is_client: true) do
+          {:ok, peer_pid} ->
+            :gen_tcp.controlling_process(socket, peer_pid)
+            {:reply, {:ok, peer_pid}, state}
+          {:error, reason} ->
+            :gen_tcp.close(socket)
+            {:reply, {:error, reason}, state}
+        end
       
       {:error, reason} ->
         {:reply, {:error, reason}, state}

@@ -144,10 +144,13 @@ defmodule Crispkey.Sync.Peer do
       {:ok, <<len::32>>} ->
         case :gen_tcp.recv(state.socket, len, 5000) do
           {:ok, data} ->
-            {:ok, Crispkey.Sync.Protocol.decode(<<len::32, data::binary>>), state}
-          error -> error
+            case Crispkey.Sync.Protocol.decode(<<len::32, data::binary>>) do
+              {:ok, msg} -> {:ok, msg, state}
+              :error -> {:error, :decode_error}
+            end
+          {:error, reason} -> {:error, reason}
         end
-      error -> error
+      {:error, reason} -> {:error, reason}
     end
   end
 

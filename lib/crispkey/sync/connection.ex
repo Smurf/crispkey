@@ -86,10 +86,30 @@ defmodule Crispkey.Sync.Connection do
     msg = Crispkey.Sync.Protocol.request([fingerprint], [:public, :secret])
     :gen_tcp.send(socket, Crispkey.Sync.Protocol.encode(msg))
     
-    receive do
-      {:tcp, _, _} -> :ok
-    after
-      30_000 -> {:error, :timeout}
+    receive_key_data(socket, 2)
+  end
+
+  defp receive_key_data(_socket, 0), do: :ok
+
+  defp receive_key_data(socket, count) do
+    case recv_message(socket) do
+      {:ok, %{type: "key_data", fingerprint: _fp, key_type: type, data: data}} ->
+        store_key(type, data)
+        receive_key_data(socket, count - 1)
+      {:error, _} ->
+        :ok
     end
   end
+
+  defp store_key(:public, data) do
+    {:ok, _} = Crispkey.GPG.Interface.import_key(data)
+    :ok
+  end
+
+  defp store_key(:secret, data) do
+    {:ok, _} = Crispkey.GPG.Interface.import_key(data)
+    :ok
+  end
+
+  defp store_key(_, _), do: :ok
 end

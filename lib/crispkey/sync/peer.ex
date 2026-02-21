@@ -127,7 +127,18 @@ defmodule Crispkey.Sync.Peer do
     %{state | peer_id: device_id}
   end
 
-  defp handle_message(%{type: "inventory", keys: _keys}, state) do
+  defp handle_message(%{type: "inventory", keys: _remote_keys}, state) do
+    local_keys = get_local_inventory()
+    msg = Crispkey.Sync.Protocol.inventory(local_keys)
+    data = Crispkey.Sync.Protocol.encode(msg)
+    :gen_tcp.send(state.socket, data)
+    state
+  end
+
+  defp handle_message(%{type: "request", fingerprints: fps, types: types}, state) do
+    Enum.each(fps, fn fp ->
+      send_key(state.socket, fp, types)
+    end)
     state
   end
 
@@ -221,6 +232,28 @@ defmodule Crispkey.Sync.Peer do
       30_000 -> {:error, :timeout}
     end
   end
+
+  defp send_key(socket, fingerprint, types) do
+    Enum.each(types, fn type ->
+      case export_key(fingerprint, type) do
+        {:ok, data} ->
+          msg = Crispkey.Sync.Protocol.key_data(fingerprint, type, data, %{})
+          :gen_tcp.send(socket, Crispkey.Sync.Protocol.encode(msg))
+        _ ->
+          :ok
+      end
+    end)
+  end
+
+  defp export_key(fingerprint, :public) do
+    Crispkey.GPG.Interface.export_public_key(fingerprint)
+  end
+
+  defp export_key(fingerprint, :secret) do
+    Crispkey.GPG.Interface.export_secret_key(fingerprint)
+  end
+
+  defp export_key(_fingerprint, _), do: {:error, :unknown_type}
 
   defp store_key(_fingerprint, :public, data) do
     {:ok, _} = Crispkey.GPG.Interface.import_key(data)

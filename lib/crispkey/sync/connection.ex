@@ -73,6 +73,9 @@ defmodule Crispkey.Sync.Connection do
     
     case recv_message(socket) do
       {:ok, %{type: "inventory", keys: remote_keys}} ->
+        public_count = Enum.count(remote_keys, fn k -> atomize(k.type) == :public end)
+        secret_count = Enum.count(remote_keys, fn k -> atomize(k.type) == :secret end)
+        IO.puts("Remote inventory: #{public_count} public + #{secret_count} secret = #{length(remote_keys)} total")
         {:ok, remote_keys}
       {:error, reason} ->
         {:error, reason}
@@ -83,8 +86,8 @@ defmodule Crispkey.Sync.Connection do
     :gen_tcp.close(socket)
   end
 
-  defp recv_message(socket) do
-    case :gen_tcp.recv(socket, 4, 5000) do
+  defp recv_message(socket, timeout \\ 5000) do
+    case :gen_tcp.recv(socket, 4, timeout) do
       {:ok, <<len::32>>} ->
         case :gen_tcp.recv(socket, len, 5000) do
           {:ok, data} ->
@@ -99,33 +102,54 @@ defmodule Crispkey.Sync.Connection do
     {:ok, pub_keys} = Crispkey.GPG.Interface.list_public_keys()
     {:ok, sec_keys} = Crispkey.GPG.Interface.list_secret_keys()
     
-    (pub_keys ++ sec_keys)
+    inventory = (pub_keys ++ sec_keys)
     |> Enum.map(fn key ->
       %{fingerprint: key.fingerprint, type: key.type, modified: key.created_at}
     end)
+    
+    IO.puts("Local inventory: #{length(pub_keys)} public + #{length(sec_keys)} secret = #{length(inventory)} total")
+    
+    inventory
   end
 
   defp find_needed_keys(local, remote) do
-    local_fps = MapSet.new(local, & &1.fingerprint)
-    remote_fps = MapSet.new(remote, & &1.fingerprint)
-    MapSet.difference(remote_fps, local_fps) |> MapSet.to_list()
+    local_set = MapSet.new(local, fn k -> {k.fingerprint, atomize(k.type)} end)
+    remote_set = MapSet.new(remote, fn k -> {k.fingerprint, atomize(k.type)} end)
+    
+    diff = MapSet.difference(remote_set, local_set)
+    IO.puts("Missing keys: #{inspect(MapSet.to_list(diff))}")
+    
+    diff
+    |> MapSet.to_list()
+    |> Enum.map(fn {fp, _type} -> fp end)
+    |> Enum.uniq()
   end
+
+  defp atomize(type) when is_binary(type), do: String.to_atom(type)
+  defp atomize(type) when is_atom(type), do: type
 
   defp request_key(socket, fingerprint) do
     msg = Crispkey.Sync.Protocol.request([fingerprint], [:public, :secret])
     :gen_tcp.send(socket, Crispkey.Sync.Protocol.encode(msg))
     
-    receive_key_data(socket, 2)
+    receive_key_data(socket)
   end
 
-  defp receive_key_data(_socket, 0), do: :ok
-
-  defp receive_key_data(socket, count) do
-    case recv_message(socket) do
+  defp receive_key_data(socket) do
+    case recv_message(socket, 5000) do
       {:ok, %{type: "key_data", fingerprint: fp, key_type: type, data: data}} ->
         IO.puts("Received key_data for #{fp}, type=#{type}, #{byte_size(data)} bytes")
         store_key(type, data)
-        receive_key_data(socket, count - 1)
+        receive_key_data(socket)
+      {:ok, %{type: "ack"}} ->
+        IO.puts("Received ack, done with this key")
+        :ok
+      {:ok, %{type: other}} ->
+        IO.puts("Received #{other}, stopping key receive")
+        :ok
+      {:error, :timeout} ->
+        IO.puts("Timeout waiting for key data")
+        :ok
       {:error, reason} ->
         IO.puts("Error receiving key data: #{inspect(reason)}")
         :ok

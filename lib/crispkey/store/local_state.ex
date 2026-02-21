@@ -47,7 +47,9 @@ defmodule Crispkey.Store.LocalState do
   end
 
   def handle_call({:add_peer, peer}, _from, state) do
-    peers = Map.put(state.peers, peer.id, peer)
+    peer_id = if is_atom(peer.id), do: Atom.to_string(peer.id), else: peer.id
+    peer = Map.put(peer, :id, peer_id)
+    peers = Map.put(state.peers, peer_id, peer)
     new_state = %{state | peers: peers}
     save_state(new_state)
     {:reply, :ok, new_state}
@@ -87,7 +89,14 @@ defmodule Crispkey.Store.LocalState do
     case File.read(path) do
       {:ok, data} ->
         case Jason.decode(data, keys: :atoms) do
-          {:ok, state} -> Map.merge(default, state)
+          {:ok, state} -> 
+            peers = Map.get(state, :peers, %{})
+            peers = for {k, v} <- peers, into: %{} do
+              key = if is_atom(k), do: Atom.to_string(k), else: k
+              {key, v}
+            end
+            state = Map.put(state, :peers, peers)
+            Map.merge(default, state)
           _ -> default
         end
       _ -> default

@@ -143,8 +143,8 @@ Output:
 Discovering devices (5s)...
 Make sure 'crispkey daemon' is running on other devices.
 Found 2 device(s):
-  a1b2c3d4e5f6g7h8 on port 4829
-  i9j0k1l2m3n4o5p6 on port 4829
+  a1b2c3d4e5f6g7h8 @ 192.168.1.100:4829
+  i9j0k1l2m3n4o5p6 @ 192.168.1.101:4829
 ```
 
 Specify a custom timeout (in seconds):
@@ -155,7 +155,15 @@ Specify a custom timeout (in seconds):
 
 ### Pairing Devices
 
-After discovering peers, pair with them by hostname or IP:
+After discovering peers, pair with them by device ID or IP address:
+
+**By device ID (recommended):**
+
+```bash
+./crispkey pair a1b2c3d4e5f6g7h8
+```
+
+**By IP address:**
 
 ```bash
 ./crispkey pair 192.168.1.100
@@ -194,7 +202,7 @@ Usage:
   crispkey devices           List paired devices
   crispkey daemon            Start background sync daemon
   crispkey discover [sec]    Find devices on network
-  crispkey pair <host>       Pair with a device
+  crispkey pair <id|host>    Pair with a device (by ID or IP)
   crispkey sync [device]     Sync keys with device(s)
   crispkey export <fp>       Export key (armored)
   crispkey wrap <fp>         Export wrapped (encrypted) key

@@ -26,13 +26,21 @@ defmodule Crispkey.Sync.Peer do
       buffer: <<>>
     }
     
-    if state.is_client do
-      send_hello(state)
+    {:ok, state, {:continue, :handshake}}
+  end
+
+  @impl true
+  def handle_continue(:handshake, state) do
+    result = if state.is_client do
+      client_handshake(state)
     else
-      expect_hello(state)
+      server_handshake(state)
     end
     
-    {:ok, state}
+    case result do
+      {:ok, state} -> {:noreply, state}
+      {:error, _reason} -> {:stop, :handshake_failed, state}
+    end
   end
 
   @impl true
@@ -85,17 +93,29 @@ defmodule Crispkey.Sync.Peer do
     :gen_tcp.send(state.socket, data)
   end
 
-  defp expect_hello(state) do
+  defp client_handshake(state) do
+    send_hello(state)
     case recv_message(state) do
       {:ok, %{type: :hello, device_id: device_id}, state} ->
+        :inet.setopts(state.socket, [{:active, true}])
         {:ok, %{state | peer_id: device_id}}
-      
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  defp handle_message(%{type: :hello, device_id: device_id} = _msg, state) do
+  defp server_handshake(state) do
+    case recv_message(state) do
+      {:ok, %{type: :hello, device_id: device_id}, state} ->
+        send_hello(state)
+        :inet.setopts(state.socket, [{:active, true}])
+        {:ok, %{state | peer_id: device_id}}
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp handle_message(%{type: :hello, device_id: device_id}, state) do
     %{state | peer_id: device_id}
   end
 

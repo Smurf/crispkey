@@ -128,19 +128,24 @@ defmodule Crispkey.Sync.Peer do
   end
 
   defp handle_message(%{type: "auth", password_hash: hash}, state) do
+    IO.puts("[PEER] Received auth request")
     if Crispkey.Store.LocalState.verify_sync_password_hash(hash) do
+      IO.puts("[PEER] Auth succeeded")
       msg = Crispkey.Sync.Protocol.auth_ok()
       :gen_tcp.send(state.socket, Crispkey.Sync.Protocol.encode(msg))
       %{state | authenticated: true}
     else
+      IO.puts("[PEER] Auth failed")
       msg = Crispkey.Sync.Protocol.auth_fail()
       :gen_tcp.send(state.socket, Crispkey.Sync.Protocol.encode(msg))
       state
     end
   end
 
-  defp handle_message(%{type: "inventory", keys: _remote_keys}, state) do
+  defp handle_message(%{type: "inventory", keys: remote_keys}, state) do
+    IO.puts("[PEER] Received inventory with #{length(remote_keys)} keys")
     local_keys = get_local_inventory()
+    IO.puts("[PEER] Sending back #{length(local_keys)} keys")
     msg = Crispkey.Sync.Protocol.inventory(local_keys)
     data = Crispkey.Sync.Protocol.encode(msg)
     :gen_tcp.send(state.socket, data)
@@ -148,10 +153,14 @@ defmodule Crispkey.Sync.Peer do
   end
 
   defp handle_message(%{type: "request", fingerprints: fps, types: types}, state) do
+    IO.puts("[PEER] Received request for #{length(fps)} keys, authenticated=#{state.authenticated}")
     if state.authenticated do
       Enum.each(fps, fn fp ->
+        IO.puts("[PEER] Sending key #{fp}")
         send_key(state.socket, fp, types)
       end)
+    else
+      IO.puts("[PEER] Not authenticated, ignoring request")
     end
     state
   end
@@ -249,11 +258,14 @@ defmodule Crispkey.Sync.Peer do
 
   defp send_key(socket, fingerprint, types) do
     Enum.each(types, fn type ->
-      case export_key(fingerprint, type) do
+      type_atom = if is_binary(type), do: String.to_atom(type), else: type
+      case export_key(fingerprint, type_atom) do
         {:ok, data} ->
-          msg = Crispkey.Sync.Protocol.key_data(fingerprint, type, data, %{})
+          IO.puts("[PEER] Exported #{type_atom} key, sending #{byte_size(data)} bytes")
+          msg = Crispkey.Sync.Protocol.key_data(fingerprint, type_atom, data, %{})
           :gen_tcp.send(socket, Crispkey.Sync.Protocol.encode(msg))
-        _ ->
+        {:error, reason} ->
+          IO.puts("[PEER] Failed to export #{type_atom}: #{inspect(reason)}")
           :ok
       end
     end)
@@ -269,12 +281,12 @@ defmodule Crispkey.Sync.Peer do
 
   defp export_key(_fingerprint, _), do: {:error, :unknown_type}
 
-  defp store_key(_fingerprint, :public, data) do
-    {:ok, _} = Crispkey.GPG.Interface.import_key(data)
-    :ok
-  end
-
-  defp store_key(_fingerprint, :secret, _data) do
+  defp store_key(_fingerprint, type, data) do
+    type_atom = if is_binary(type), do: String.to_atom(type), else: type
+    case Crispkey.GPG.Interface.import_key(data) do
+      {:ok, _} -> IO.puts("[PEER] Imported #{type_atom} key")
+      {:error, reason} -> IO.puts("[PEER] Failed to import: #{inspect(reason)}")
+    end
     :ok
   end
 

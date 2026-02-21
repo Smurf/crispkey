@@ -34,13 +34,23 @@ defmodule Crispkey.Sync.Connection do
     with :ok <- authenticate(socket, remote_password),
          {:ok, remote_keys} <- exchange_inventory(socket) do
       local_keys = get_local_inventory()
+      
+      IO.puts("Local keys: #{length(local_keys)}")
+      IO.puts("Remote keys: #{length(remote_keys)}")
+      
       needed = find_needed_keys(local_keys, remote_keys)
+      IO.puts("Keys to fetch: #{length(needed)}")
       
       Enum.each(needed, fn fingerprint ->
+        IO.puts("Requesting key: #{fingerprint}")
         request_key(socket, fingerprint)
       end)
       
       :ok
+    else
+      {:error, reason} = err ->
+        IO.puts("Sync error: #{inspect(reason)}")
+        err
     end
   end
 
@@ -112,23 +122,25 @@ defmodule Crispkey.Sync.Connection do
 
   defp receive_key_data(socket, count) do
     case recv_message(socket) do
-      {:ok, %{type: "key_data", fingerprint: _fp, key_type: type, data: data}} ->
+      {:ok, %{type: "key_data", fingerprint: fp, key_type: type, data: data}} ->
+        IO.puts("Received key_data for #{fp}, type=#{type}, #{byte_size(data)} bytes")
         store_key(type, data)
         receive_key_data(socket, count - 1)
-      {:error, _} ->
+      {:error, reason} ->
+        IO.puts("Error receiving key data: #{inspect(reason)}")
         :ok
     end
   end
 
-  defp store_key(:public, data) do
-    {:ok, _} = Crispkey.GPG.Interface.import_key(data)
-    :ok
+  defp store_key(type, data) do
+    type_atom = if is_binary(type), do: String.to_atom(type), else: type
+    case Crispkey.GPG.Interface.import_key(data) do
+      {:ok, _} -> 
+        IO.puts("Imported #{type_atom} key successfully")
+        :ok
+      {:error, reason} ->
+        IO.puts("Failed to import #{type_atom} key: #{inspect(reason)}")
+        :ok
+    end
   end
-
-  defp store_key(:secret, data) do
-    {:ok, _} = Crispkey.GPG.Interface.import_key(data)
-    :ok
-  end
-
-  defp store_key(_, _), do: :ok
 end

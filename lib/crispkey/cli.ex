@@ -13,6 +13,7 @@ defmodule Crispkey.CLI do
       ["status" | _] -> status()
       ["keys" | _] -> list_keys()
       ["devices"] -> devices()
+      ["daemon" | _] -> daemon()
       ["discover" | rest] -> discover(rest)
       ["pair", host] -> pair(host)
       ["sync" | rest] -> sync(rest)
@@ -32,7 +33,8 @@ defmodule Crispkey.CLI do
       crispkey status            Show sync status
       crispkey keys              List local GPG keys
       crispkey devices           List paired devices
-      crispkey discover          Find devices on network
+      crispkey daemon            Start background sync daemon
+      crispkey discover [sec]    Find devices on network
       crispkey pair <host>       Pair with a device
       crispkey sync [device]     Sync keys with device(s)
       crispkey export <fp>       Export key (armored)
@@ -119,23 +121,40 @@ defmodule Crispkey.CLI do
     end
   end
 
+  defp daemon do
+    IO.puts("Starting crispkey daemon...")
+    IO.puts("Device ID: #{Crispkey.device_id()}")
+    IO.puts("Listening for discovery on port 4830")
+    IO.puts("Listening for sync on port 4829")
+    IO.puts("Press Ctrl+C to stop")
+    
+    {:ok, _listener} = Crispkey.Sync.Listener.start_link([])
+    {:ok, _daemon} = Crispkey.Sync.Daemon.start_link([])
+    
+    Process.flag(:trap_exit, true)
+    receive do
+      {:EXIT, _, _} -> :ok
+    end
+  end
+
   defp discover(args) do
     timeout = case args do
       [t] -> String.to_integer(t) * 1000
       _ -> 5000
     end
     
-    IO.puts("Discovering devices (#{timeout}ms)...")
+    IO.puts("Discovering devices (#{div(timeout, 1000)}s)...")
+    IO.puts("Make sure 'crispkey daemon' is running on other devices.")
     
-    case Crispkey.Sync.Discovery.discover(timeout) do
-      [] ->
-        IO.puts("No devices found")
-      
-      peers ->
-        IO.puts("Found #{length(peers)} device(s):")
-        Enum.each(peers, fn peer ->
-          IO.puts("  #{peer.id} on port #{peer.port}")
-        end)
+    peers = Crispkey.Sync.Discovery.discover(timeout)
+    
+    if Enum.empty?(peers) do
+      IO.puts("No devices found")
+    else
+      IO.puts("Found #{length(peers)} device(s):")
+      Enum.each(peers, fn peer ->
+        IO.puts("  #{peer.id} on port #{peer.port}")
+      end)
     end
   end
 

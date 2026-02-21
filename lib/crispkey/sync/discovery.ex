@@ -1,92 +1,61 @@
 defmodule Crispkey.Sync.Discovery do
   @moduledoc """
-  mDNS-based peer discovery on local network.
+  UDP multicast peer discovery on local network.
   """
-
-  use GenServer
 
   @multicast_addr {224, 0, 0, 251}
   @discovery_port 4830
   @service_name "_crispkey._tcp.local"
 
-  def start_link(opts) do
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
-  end
-
-  def discover(timeout \\ 5000) do
-    GenServer.call(__MODULE__, {:discover, timeout}, timeout + 1000)
-  end
-
-  def broadcast do
-    GenServer.cast(__MODULE__, :broadcast)
-  end
-
-  @impl true
-  def init(opts) do
-    port = Keyword.get(opts, :port, @discovery_port)
-    
-    {:ok, socket} = :gen_udp.open(port, [
+  def discover(timeout_ms \\ 5000) do
+    {:ok, socket} = :gen_udp.open(0, [
       :binary,
       {:reuseaddr, true},
-      {:ip, {0, 0, 0, 0}},
-      {:multicast_if, {0, 0, 0, 0}},
-      {:multicast_ttl, 1},
-      {:multicast_loop, true},
-      {:add_membership, {@multicast_addr, {0, 0, 0, 0}}}
+      {:active, false}
     ])
     
-    state = %{
-      socket: socket,
-      port: port,
-      discovered: %{}
-    }
-    
-    {:ok, state}
-  end
-
-  @impl true
-  def handle_call({:discover, timeout}, _from, state) do
-    broadcast_presence(state)
-    
-    timer = Process.send_after(self(), :discover_timeout, timeout)
-    
-    {:noreply, %{state | discovering: true, discover_timer: timer}}
-  end
-
-  @impl true
-  def handle_cast(:broadcast, state) do
-    broadcast_presence(state)
-    {:noreply, state}
-  end
-
-  @impl true
-  def handle_info({:udp, _socket, _ip, _port, data}, state) do
-    case parse_announcement(data) do
-      {:ok, peer} ->
-        discovered = Map.put(state.discovered, peer.id, peer)
-        
-        if state.discovering do
-          send(self(), :collect_peer)
-        end
-        
-        {:noreply, %{state | discovered: discovered}}
-      
-      _ ->
-        {:noreply, state}
-    end
-  end
-
-  def handle_info(:discover_timeout, state) do
-    {:stop, {:shutdown, Map.values(state.discovered)}, state}
-  end
-
-  def handle_info(:collect_peer, state) do
-    {:noreply, state}
-  end
-
-  defp broadcast_presence(state) do
     msg = encode_announcement()
-    :gen_udp.send(state.socket, @multicast_addr, state.port, msg)
+    :gen_udp.send(socket, @multicast_addr, @discovery_port, msg)
+    
+    peers = collect_responses(socket, timeout_ms, %{})
+    
+    :gen_udp.close(socket)
+    
+    Map.values(peers)
+  end
+
+  defp collect_responses(socket, timeout_ms, peers) do
+    start = System.monotonic_time(:millisecond)
+    do_collect(socket, start, timeout_ms, peers)
+  end
+
+  defp do_collect(socket, start, timeout_ms, peers) do
+    elapsed = System.monotonic_time(:millisecond) - start
+    remaining = timeout_ms - elapsed
+    
+    if remaining <= 0 do
+      peers
+    else
+      case :gen_udp.recv(socket, 0, min(remaining, 500)) do
+        {:ok, {_ip, _port, data}} ->
+          case parse_announcement(data) do
+            {:ok, peer} ->
+              if peer.id != Crispkey.device_id() do
+                do_collect(socket, start, timeout_ms, Map.put(peers, peer.id, peer))
+              else
+                do_collect(socket, start, timeout_ms, peers)
+              end
+            :error ->
+              do_collect(socket, start, timeout_ms, peers)
+          end
+        
+        {:error, :timeout} ->
+          do_collect(socket, start, timeout_ms, peers)
+        
+        {:error, _} ->
+          peers
+      end
+    end
   end
 
   defp encode_announcement do
@@ -101,10 +70,7 @@ defmodule Crispkey.Sync.Discovery do
   defp parse_announcement(data) do
     with {:ok, msg} <- Jason.decode(data, keys: :atoms),
          true <- msg.service == @service_name do
-      {:ok, %{
-        id: msg.id,
-        port: msg.port
-      }}
+      {:ok, %{id: msg.id, port: msg.port}}
     else
       _ -> :error
     end

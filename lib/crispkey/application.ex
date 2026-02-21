@@ -4,8 +4,7 @@ defmodule Crispkey.Application do
   @impl true
   def start(_type, _args) do
     children = [
-      Crispkey.Store.LocalState,
-      Crispkey.Sync.Listener
+      Crispkey.Store.LocalState
     ]
 
     opts = [strategy: :one_for_one, name: Crispkey.Supervisor]

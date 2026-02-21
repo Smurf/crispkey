@@ -15,7 +15,7 @@ defmodule Crispkey.CLI do
       ["devices"] -> devices()
       ["daemon" | _] -> daemon()
       ["discover" | rest] -> discover(rest)
-      ["pair", host] -> pair(host)
+      ["pair", target] -> pair(target)
       ["sync" | rest] -> sync(rest)
       ["export", fp | _] -> export_key(fp)
       ["wrap", fp | _] -> wrap_key(fp)
@@ -35,7 +35,7 @@ defmodule Crispkey.CLI do
       crispkey devices           List paired devices
       crispkey daemon            Start background sync daemon
       crispkey discover [sec]    Find devices on network
-      crispkey pair <host>       Pair with a device
+      crispkey pair <id|host>    Pair with a device (by ID or IP)
       crispkey sync [device]     Sync keys with device(s)
       crispkey export <fp>       Export key (armored)
       crispkey wrap <fp>         Export wrapped (encrypted) key
@@ -112,7 +112,7 @@ defmodule Crispkey.CLI do
     peers = Crispkey.Store.LocalState.get_peers()
     
     if Enum.empty?(peers) do
-      IO.puts("No paired devices. Use 'crispkey discover' and 'crispkey pair <host>'")
+      IO.puts("No paired devices. Use 'crispkey discover' and 'crispkey pair <id|host>'")
     else
       IO.puts("Paired devices:")
       Enum.each(peers, fn peer ->
@@ -151,49 +151,104 @@ defmodule Crispkey.CLI do
     if Enum.empty?(peers) do
       IO.puts("No devices found")
     else
+      Crispkey.Store.Peers.save(peers)
+      
       IO.puts("Found #{length(peers)} device(s):")
       Enum.each(peers, fn peer ->
-        IO.puts("  #{peer.id} on port #{peer.port}")
+        IO.puts("  #{peer.id} @ #{peer.ip}:#{peer.port}")
       end)
     end
   end
 
-  defp pair(host) do
-    IO.puts("Pairing with #{host}...")
+  defp pair(target) do
+    {host, device_id} = resolve_target(target)
     
-    case Crispkey.Sync.Listener.connect(host) do
-      {:ok, peer} ->
-        IO.puts("Connected to peer")
+    IO.puts("Pairing with #{device_id} @ #{host}...")
+    
+    case Crispkey.Sync.Connection.connect(host) do
+      {:ok, %{peer_id: peer_id}} ->
         Crispkey.Store.LocalState.add_peer(%{
-          id: peer,
+          id: peer_id,
           host: host,
           port: Application.get_env(:crispkey, :sync_port, 4829),
           paired_at: DateTime.utc_now()
         })
-        IO.puts("Paired successfully")
+        IO.puts("Paired successfully with #{peer_id}")
       
       {:error, reason} ->
         IO.puts("Connection failed: #{inspect(reason)}")
     end
   end
 
+  defp resolve_target(target) do
+    if is_ip_address?(target) do
+      {target, target}
+    else
+      case Crispkey.Store.Peers.find(target) do
+        nil ->
+          if looks_like_device_id?(target) do
+            IO.puts("Device #{target} not found in recent discoveries.")
+            IO.puts("Run 'crispkey discover' first to find devices on your network.")
+            System.halt(1)
+          else
+            {target, target}
+          end
+        
+        peer ->
+          {peer.ip, peer.id}
+      end
+    end
+  end
+
+  defp is_ip_address?(str) do
+    case String.split(str, ".") do
+      [a, b, c, d] ->
+        Enum.all?([a, b, c, d], fn part ->
+          case Integer.parse(part) do
+            {n, ""} -> n >= 0 and n <= 255
+            _ -> false
+          end
+        end)
+      _ -> false
+    end
+  end
+
+  defp looks_like_device_id?(str) do
+    String.length(str) == 16 and String.match?(str, ~r/^[a-f0-9]+$/)
+  end
+
   defp sync(args) do
     state = Crispkey.Store.LocalState.get_state()
     
     peers = case args do
-      [peer_id] -> [%{id: peer_id}]
+      [peer_id] -> 
+        case Map.get(state.peers, peer_id) do
+          nil -> 
+            IO.puts("Device #{peer_id} not paired. Use 'crispkey pair #{peer_id}' first.")
+            System.halt(1)
+          peer -> [peer]
+        end
       [] -> Map.values(state.peers)
     end
     
     if Enum.empty?(peers) do
-      IO.puts("No devices to sync with. Use 'crispkey pair <host>' first.")
+      IO.puts("No devices to sync with. Use 'crispkey pair <id|host>' first.")
     else
       Enum.each(peers, fn peer ->
         IO.puts("Syncing with #{peer.id}...")
         
-        case Crispkey.Sync.Listener.sync_with(peer.id) do
-          :ok -> IO.puts("Sync complete with #{peer.id}")
-          {:error, reason} -> IO.puts("Sync failed: #{inspect(reason)}")
+        case Crispkey.Sync.Connection.connect(peer.host) do
+          {:ok, conn} ->
+            result = Crispkey.Sync.Connection.sync(conn.socket)
+            Crispkey.Sync.Connection.close(conn)
+            
+            case result do
+              :ok -> IO.puts("Sync complete with #{peer.id}")
+              {:error, reason} -> IO.puts("Sync failed: #{inspect(reason)}")
+            end
+          
+          {:error, reason} ->
+            IO.puts("Connection failed: #{inspect(reason)}")
         end
       end)
     end

@@ -37,10 +37,11 @@ defmodule Crispkey.Sync.Discovery do
       peers
     else
       case :gen_udp.recv(socket, 0, min(remaining, 500)) do
-        {:ok, {_ip, _port, data}} ->
+        {:ok, {ip, _port, data}} ->
           case parse_announcement(data) do
             {:ok, peer} ->
               if peer.id != Crispkey.device_id() do
+                peer = Map.put(peer, :ip, format_ip(ip))
                 do_collect(socket, start, timeout_ms, Map.put(peers, peer.id, peer))
               else
                 do_collect(socket, start, timeout_ms, peers)
@@ -57,6 +58,8 @@ defmodule Crispkey.Sync.Discovery do
       end
     end
   end
+
+  defp format_ip({a, b, c, d}), do: "#{a}.#{b}.#{c}.#{d}"
 
   defp encode_announcement do
     %{

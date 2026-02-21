@@ -294,4 +294,4 @@ mix test
 
 ## License
 
-MIT
+GPL v3

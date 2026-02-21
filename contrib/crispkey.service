@@ -1,0 +1,25 @@
+[Unit]
+Description=Crispkey GPG Key Sync Daemon
+Documentation=https://github.com/anomalyco/crispkey
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/crispkey daemon
+Restart=on-failure
+RestartSec=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=crispkey
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/crispkey %h/.gnupg
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

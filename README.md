@@ -11,11 +11,22 @@ GPG key synchronization across devices using peer-to-peer discovery and sync.
 
 ## Installation
 
+### From Source
+
 ```bash
 mix deps.get
 mix escript.build
 ./crispkey init
 ```
+
+### System-wide Install
+
+```bash
+# Build and install to /usr/local/bin
+./install.sh
+```
+
+This also installs a systemd user service. See [Running as a Service](#running-as-a-service).
 
 ## Quick Start
 
@@ -77,6 +88,46 @@ For production use, run as a systemd service or background process:
 ```bash
 # Run in background
 nohup ./crispkey daemon > /var/log/crispkey.log 2>&1 &
+```
+
+### Running as a Service
+
+crispkey includes a systemd user service for automatic startup.
+
+**Install the service:**
+
+```bash
+# Build and install
+./install.sh
+
+# Or manually:
+mkdir -p ~/.config/systemd/user
+cp contrib/crispkey.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+```
+
+**Manage the service:**
+
+```bash
+# Start now
+systemctl --user start crispkey
+
+# Enable at login
+systemctl --user enable crispkey
+
+# Check status
+systemctl --user status crispkey
+
+# View logs
+journalctl --user -u crispkey -f
+```
+
+**Linger for headless servers:**
+
+To keep the service running when you're not logged in:
+
+```bash
+sudo loginctl enable-linger $USER
 ```
 
 ### Discovering Peers

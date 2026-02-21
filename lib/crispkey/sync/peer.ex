@@ -87,6 +87,14 @@ defmodule Crispkey.Sync.Peer do
     {:stop, :normal, state}
   end
 
+  def handle_info({:inventory, _keys}, state) do
+    {:noreply, state}
+  end
+
+  def handle_info(_msg, state) do
+    {:noreply, state}
+  end
+
   defp send_hello(state) do
     msg = Crispkey.Sync.Protocol.hello(Crispkey.device_id())
     data = Crispkey.Sync.Protocol.encode(msg)
@@ -119,8 +127,7 @@ defmodule Crispkey.Sync.Peer do
     %{state | peer_id: device_id}
   end
 
-  defp handle_message(%{type: "inventory", keys: keys}, state) do
-    send(self(), {:inventory, keys})
+  defp handle_message(%{type: "inventory", keys: _keys}, state) do
     state
   end
 

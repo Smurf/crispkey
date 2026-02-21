@@ -56,12 +56,21 @@ defmodule Crispkey.CLI do
       System.halt(1)
     end
     
+    sync_password = get_passphrase("Enter sync password (for remote devices to sync with you): ")
+    sync_confirm = get_passphrase("Confirm sync password: ")
+    
+    if sync_password != sync_confirm do
+      IO.puts("Sync passwords do not match")
+      System.halt(1)
+    end
+    
     test_data = "crispkey_init_test"
     wrapped = Crispkey.Crypto.KeyWrapper.wrap(test_data, passphrase)
     
     case Crispkey.Crypto.KeyWrapper.unwrap(wrapped, passphrase) do
       {:ok, ^test_data} ->
         Crispkey.Store.LocalState.update_state(fn s -> %{s | initialized: true} end)
+        Crispkey.Store.LocalState.set_sync_password(sync_password)
         IO.puts("Initialized successfully. Device ID: #{Crispkey.device_id()}")
       
       {:error, _} ->
@@ -234,16 +243,19 @@ defmodule Crispkey.CLI do
     if Enum.empty?(peers) do
       IO.puts("No devices to sync with. Use 'crispkey pair <id|host>' first.")
     else
+      remote_password = get_passphrase("Enter remote device's sync password: ")
+      
       Enum.each(peers, fn peer ->
         IO.puts("Syncing with #{peer.id}...")
         
         case Crispkey.Sync.Connection.connect(peer.host) do
           {:ok, conn} ->
-            result = Crispkey.Sync.Connection.sync(conn.socket)
+            result = Crispkey.Sync.Connection.sync(conn.socket, remote_password)
             Crispkey.Sync.Connection.close(conn)
             
             case result do
               :ok -> IO.puts("Sync complete with #{peer.id}")
+              {:error, :auth_failed} -> IO.puts("Sync failed: Wrong sync password")
               {:error, reason} -> IO.puts("Sync failed: #{inspect(reason)}")
             end
           

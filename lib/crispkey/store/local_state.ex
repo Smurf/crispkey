@@ -29,6 +29,20 @@ defmodule Crispkey.Store.LocalState do
     GenServer.call(__MODULE__, {:record_sync, peer_id, key_fingerprint, timestamp || DateTime.utc_now()})
   end
 
+  def set_sync_password(password) do
+    hash = :crypto.hash(:sha256, password) |> Base.encode64()
+    GenServer.call(__MODULE__, {:set_sync_password, hash})
+  end
+
+  def verify_sync_password(password) do
+    hash = :crypto.hash(:sha256, password) |> Base.encode64()
+    GenServer.call(__MODULE__, {:verify_sync_password, hash})
+  end
+
+  def verify_sync_password_hash(hash) do
+    GenServer.call(__MODULE__, {:verify_sync_password, hash})
+  end
+
   @impl true
   def init([]) do
     state = load_state()
@@ -75,6 +89,17 @@ defmodule Crispkey.Store.LocalState do
     {:reply, :ok, new_state}
   end
 
+  def handle_call({:set_sync_password, hash}, _from, state) do
+    new_state = Map.put(state, :sync_password_hash, hash)
+    save_state(new_state)
+    {:reply, :ok, new_state}
+  end
+
+  def handle_call({:verify_sync_password, hash}, _from, state) do
+    result = Map.get(state, :sync_password_hash) == hash
+    {:reply, result, state}
+  end
+
   defp load_state do
     path = state_path()
     
@@ -83,7 +108,8 @@ defmodule Crispkey.Store.LocalState do
       peers: %{},
       key_syncs: %{},
       last_sync: nil,
-      initialized: false
+      initialized: false,
+      sync_password_hash: nil
     }
     
     case File.read(path) do

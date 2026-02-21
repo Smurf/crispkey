@@ -30,21 +30,40 @@ defmodule Crispkey.Sync.Connection do
     end
   end
 
-  def sync(socket) do
+  def sync(socket, remote_password) do
+    with :ok <- authenticate(socket, remote_password),
+         {:ok, remote_keys} <- exchange_inventory(socket) do
+      local_keys = get_local_inventory()
+      needed = find_needed_keys(local_keys, remote_keys)
+      
+      Enum.each(needed, fn fingerprint ->
+        request_key(socket, fingerprint)
+      end)
+      
+      :ok
+    end
+  end
+
+  defp authenticate(socket, password) do
+    hash = :crypto.hash(:sha256, password) |> Base.encode64()
+    msg = Crispkey.Sync.Protocol.auth(hash)
+    :gen_tcp.send(socket, Crispkey.Sync.Protocol.encode(msg))
+    
+    case recv_message(socket) do
+      {:ok, %{type: "auth_ok"}} -> :ok
+      {:ok, %{type: "auth_fail"}} -> {:error, :auth_failed}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp exchange_inventory(socket) do
     local_keys = get_local_inventory()
     msg = Crispkey.Sync.Protocol.inventory(local_keys)
     :gen_tcp.send(socket, Crispkey.Sync.Protocol.encode(msg))
     
     case recv_message(socket) do
       {:ok, %{type: "inventory", keys: remote_keys}} ->
-        needed = find_needed_keys(local_keys, remote_keys)
-        
-        Enum.each(needed, fn fingerprint ->
-          request_key(socket, fingerprint)
-        end)
-        
-        :ok
-      
+        {:ok, remote_keys}
       {:error, reason} ->
         {:error, reason}
     end

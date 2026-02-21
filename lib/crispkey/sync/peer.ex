@@ -127,6 +127,18 @@ defmodule Crispkey.Sync.Peer do
     %{state | peer_id: device_id}
   end
 
+  defp handle_message(%{type: "auth", password_hash: hash}, state) do
+    if Crispkey.Store.LocalState.verify_sync_password_hash(hash) do
+      msg = Crispkey.Sync.Protocol.auth_ok()
+      :gen_tcp.send(state.socket, Crispkey.Sync.Protocol.encode(msg))
+      %{state | authenticated: true}
+    else
+      msg = Crispkey.Sync.Protocol.auth_fail()
+      :gen_tcp.send(state.socket, Crispkey.Sync.Protocol.encode(msg))
+      state
+    end
+  end
+
   defp handle_message(%{type: "inventory", keys: _remote_keys}, state) do
     local_keys = get_local_inventory()
     msg = Crispkey.Sync.Protocol.inventory(local_keys)
@@ -136,9 +148,11 @@ defmodule Crispkey.Sync.Peer do
   end
 
   defp handle_message(%{type: "request", fingerprints: fps, types: types}, state) do
-    Enum.each(fps, fn fp ->
-      send_key(state.socket, fp, types)
-    end)
+    if state.authenticated do
+      Enum.each(fps, fn fp ->
+        send_key(state.socket, fp, types)
+      end)
+    end
     state
   end
 

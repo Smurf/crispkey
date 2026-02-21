@@ -11,12 +11,16 @@ defmodule Crispkey.Sync.Protocol do
     %{type: :hello, version: @version, device_id: device_id}
   end
 
-  def auth(fingerprint, signature) do
-    %{type: :auth, fingerprint: fingerprint, signature: signature}
+  def auth(password_hash) do
+    %{type: :auth, password_hash: password_hash}
   end
 
-  def auth_ok(session_key) do
-    %{type: :auth_ok, session_key: session_key}
+  def auth_ok do
+    %{type: :auth_ok}
+  end
+
+  def auth_fail do
+    %{type: :auth_fail}
   end
 
   def inventory(keys) do
@@ -27,8 +31,8 @@ defmodule Crispkey.Sync.Protocol do
     %{type: :request, fingerprints: fingerprints, types: types}
   end
 
-  def key_data(fingerprint, key_type, wrapped_data, metadata) do
-    %{type: :key_data, fingerprint: fingerprint, key_type: key_type, data: wrapped_data, metadata: metadata}
+  def key_data(fingerprint, key_type, data, metadata \\ %{}) do
+    %{type: :key_data, fingerprint: fingerprint, key_type: key_type, data: data, metadata: metadata}
   end
 
   def trust_data(data) do

@@ -21,7 +21,7 @@ defmodule Crispkey.Sync.Connection do
     :gen_tcp.send(socket, data)
     
     case recv_message(socket) do
-      {:ok, %{type: :hello, device_id: device_id}} ->
+      {:ok, %{type: "hello", device_id: device_id}} ->
         {:ok, %{socket: socket, peer_id: device_id}}
       
       {:error, reason} ->
@@ -36,7 +36,7 @@ defmodule Crispkey.Sync.Connection do
     :gen_tcp.send(socket, Crispkey.Sync.Protocol.encode(msg))
     
     case recv_message(socket) do
-      {:ok, %{type: :inventory, keys: remote_keys}} ->
+      {:ok, %{type: "inventory", keys: remote_keys}} ->
         needed = find_needed_keys(local_keys, remote_keys)
         
         Enum.each(needed, fn fingerprint ->

@@ -96,7 +96,7 @@ defmodule Crispkey.Sync.Peer do
   defp client_handshake(state) do
     send_hello(state)
     case recv_message(state) do
-      {:ok, %{type: :hello, device_id: device_id}, state} ->
+      {:ok, %{type: "hello", device_id: device_id}, state} ->
         :inet.setopts(state.socket, [{:active, true}])
         {:ok, %{state | peer_id: device_id}}
       {:error, reason} ->
@@ -106,7 +106,7 @@ defmodule Crispkey.Sync.Peer do
 
   defp server_handshake(state) do
     case recv_message(state) do
-      {:ok, %{type: :hello, device_id: device_id}, state} ->
+      {:ok, %{type: "hello", device_id: device_id}, state} ->
         send_hello(state)
         :inet.setopts(state.socket, [{:active, true}])
         {:ok, %{state | peer_id: device_id}}
@@ -115,28 +115,28 @@ defmodule Crispkey.Sync.Peer do
     end
   end
 
-  defp handle_message(%{type: :hello, device_id: device_id}, state) do
+  defp handle_message(%{type: "hello", device_id: device_id}, state) do
     %{state | peer_id: device_id}
   end
 
-  defp handle_message(%{type: :inventory, keys: keys}, state) do
+  defp handle_message(%{type: "inventory", keys: keys}, state) do
     send(self(), {:inventory, keys})
     state
   end
 
-  defp handle_message(%{type: :key_data, fingerprint: fp, key_type: type, data: data}, state) do
+  defp handle_message(%{type: "key_data", fingerprint: fp, key_type: type, data: data}, state) do
     store_key(fp, type, data)
     Crispkey.Store.LocalState.record_sync(state.peer_id, fp)
     state
   end
 
-  defp handle_message(%{type: :trust_data, data: data}, state) do
+  defp handle_message(%{type: "trust_data", data: data}, state) do
     store_trust(data)
     state
   end
 
-  defp handle_message(%{type: :ack}, state), do: state
-  defp handle_message(%{type: :goodbye}, state), do: state
+  defp handle_message(%{type: "ack"}, state), do: state
+  defp handle_message(%{type: "goodbye"}, state), do: state
   defp handle_message(_, state), do: state
 
   defp recv_message(state) do
@@ -191,7 +191,7 @@ defmodule Crispkey.Sync.Peer do
     :gen_tcp.send(state.socket, data)
     
     case recv_message(state) do
-      {:ok, %{type: :inventory, keys: remote_keys}, state} ->
+      {:ok, %{type: "inventory", keys: remote_keys}, state} ->
         {:ok, remote_keys, state}
       error -> error
     end

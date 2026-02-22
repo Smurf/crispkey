@@ -428,6 +428,15 @@ Built-in Erlang:
 4. **No key deletion sync** - Only adds keys, doesn't remove
 5. **Single sync direction** - Client pulls from server, not bidirectional
 
+## Testing
+
+For iterative testing with isolated Podman containers, see [TESTING.md](TESTING.md).
+
+The testing environment provides:
+- Two containers (`alice` and `bob`) in an isolated network
+- Automated setup, pairing, and sync tests
+- Watch mode for continuous testing during development
+
 ## Future Work
 
 - TLS encryption for transport

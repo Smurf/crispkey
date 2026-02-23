@@ -159,6 +159,8 @@ defmodule Crispkey.Sync.Peer do
         IO.puts("[PEER] Sending key #{fp}")
         send_key(state.socket, fp, types)
       end)
+      msg = Crispkey.Sync.Protocol.ack("request", :done)
+      :gen_tcp.send(state.socket, Crispkey.Sync.Protocol.encode(msg))
     else
       IO.puts("[PEER] Not authenticated, ignoring request")
     end
@@ -219,10 +221,14 @@ defmodule Crispkey.Sync.Peer do
     {:ok, pub_keys} = Crispkey.GPG.Interface.list_public_keys()
     {:ok, sec_keys} = Crispkey.GPG.Interface.list_secret_keys()
     
-    (pub_keys ++ sec_keys)
+    inventory = (pub_keys ++ sec_keys)
     |> Enum.map(fn key ->
       %{fingerprint: key.fingerprint, type: key.type, modified: key.created_at}
     end)
+    
+    IO.puts("[PEER] Local inventory: #{length(pub_keys)} public + #{length(sec_keys)} secret = #{length(inventory)} total")
+    
+    inventory
   end
 
   defp exchange_inventory(state) do

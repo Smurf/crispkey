@@ -5,3 +5,6 @@
 /crispkey
 /.elixir_ls
 *.wrapped
+
+# Test volumes (container state)
+/test-volumes/**

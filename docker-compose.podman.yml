@@ -1,0 +1,51 @@
+# Podman Compose file for crispkey testing
+# Usage: podman-compose -f docker-compose.podman.yml up -d
+
+version: "3.8"
+
+services:
+  alice:
+    build:
+      context: .
+      dockerfile: Containerfile
+    container_name: crispkey-alice
+    hostname: alice
+    userns_mode: keep-id
+    user: testuser
+    networks:
+      - crispkey-test
+    volumes:
+      - ./test-volumes/alice/config:/home/testuser/.config/crispkey
+      - ./test-volumes/alice/gnupg:/home/testuser/.gnupg
+    command: daemon
+    restart: unless-stopped
+    labels:
+      - "crispkey.role=test"
+      - "crispkey.container=alice"
+
+  bob:
+    build:
+      context: .
+      dockerfile: Containerfile
+    container_name: crispkey-bob
+    hostname: bob
+    userns_mode: keep-id
+    user: testuser
+    networks:
+      - crispkey-test
+    volumes:
+      - ./test-volumes/bob/config:/home/testuser/.config/crispkey
+      - ./test-volumes/bob/gnupg:/home/testuser/.gnupg
+    command: daemon
+    restart: unless-stopped
+    labels:
+      - "crispkey.role=test"
+      - "crispkey.container=bob"
+
+# Podman-compose creates a pod by default which conflicts with userns_mode
+x-podman:
+  in_pod: false
+
+networks:
+  crispkey-test:
+    external: true

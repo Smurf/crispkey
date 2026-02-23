@@ -22,19 +22,22 @@ crispkey/
 │   ├── crypto/
 │   │   └── key_wrapper.ex       # PBKDF2 key derivation, AES-GCM wrapping
 │   ├── gpg/
-│   │   └── interface.ex         # GPG CLI wrapper (list, export, import)
+│   │   ├── interface.ex         # GPG CLI wrapper (list, export, import)
+│   │   └── types.ex             # Key, UID, Subkey structs with typespecs
 │   ├── merge/
 │   │   └── engine.ex            # Key merge conflict detection
 │   ├── store/
 │   │   ├── local_state.ex       # Persistent state (peers, sync history)
-│   │   └── peers.ex             # Discovered peers cache
+│   │   ├── peers.ex             # Discovered peers cache
+│   │   └── types.ex             # State, Peer structs with typespecs
 │   └── sync/
 │       ├── connection.ex        # Client-side sync connection
 │       ├── daemon.ex            # Background discovery listener
 │       ├── discovery.ex         # UDP multicast discovery
 │       ├── listener.ex          # TCP sync listener (server)
+│       ├── message.ex           # Wire protocol message structs
 │       ├── peer.ex              # Per-connection peer handler (server)
-│       └── protocol.ex          # Wire protocol messages
+│       └── protocol.ex          # Wire protocol encoding/decoding
 ├── config/config.exs            # Application config
 ├── mix.exs                      # Project definition
 ├── contrib/
@@ -62,18 +65,21 @@ Entry point for all commands. Dispatches to appropriate modules.
 
 ### GPG Interface (`lib/crispkey/gpg/interface.ex`)
 
-Wraps `gpg` CLI for key operations.
+Wraps `gpg` CLI for key operations. Returns typed structs defined in `types.ex`.
+
+**Structs:**
+- `Crispkey.GPG.Key` - GPG key with fingerprint, key_id, algorithm, bits, uids, subkeys, type
+- `Crispkey.GPG.UID` - User ID with string, created_at, expires_at
+- `Crispkey.GPG.Subkey` - Subkey with fingerprint, algorithm, bits, timestamps
 
 **Functions:**
-- `list_public_keys/0` - Parse `gpg --list-keys --with-colons`
-- `list_secret_keys/0` - Parse `gpg --list-secret-keys --with-colons`
+- `list_public_keys/0` - Returns `{:ok, [Key.t()]}`, parses `gpg --list-keys --with-colons`
+- `list_secret_keys/0` - Returns `{:ok, [Key.t()]}`, parses `gpg --list-secret-keys --with-colons`
 - `export_public_key/1` - `gpg --armor --export <fp>`
 - `export_secret_key/1` - `gpg --armor --export-secret-keys <fp>`
 - `import_key/1` - `gpg --import` (uses Port for stdin)
 - `export_trustdb/0` - `gpg --export-ownertrust`
 - `import_trustdb/1` - `gpg --import-ownertrust`
-
-**Key parsing:** Uses colon-separated format, extracts fingerprint, key_id, algorithm, bits, uids, subkeys.
 
 ### Crypto (`lib/crispkey/crypto/key_wrapper.ex`)
 
@@ -93,29 +99,37 @@ Key wrapping using PBKDF2 + AES-256-GCM.
 - `wrap(plaintext, passphrase)` -> wrapped binary
 - `unwrap(wrapped, passphrase)` -> `{:ok, plaintext}` | `{:error, :decryption_failed}`
 
+### Message (`lib/crispkey/sync/message.ex`)
+
+Typed message structs for wire protocol. All messages are JSON with 4-byte length prefix.
+
+**Message structs:**
+- `Hello` - Device handshake (device_id, version)
+- `Auth` - Sync password hash (password_hash)
+- `AuthOk` / `AuthFail` - Authentication result
+- `Inventory` - List of keys (keys array)
+- `Request` - Request keys by fingerprint
+- `KeyData` - Key data transfer (fingerprint, key_type, data)
+- `TrustData` - Trust database transfer
+- `Ack` - Acknowledgment
+- `Goodbye` - Connection close
+
+**Key functions:**
+- `encode/1` - Convert struct to wire format
+- `decode/1` - Parse wire data to struct (safe atomization)
+- `to_wire/1` - Convert struct to JSON-compatible map
+- `from_wire/1` - Parse JSON map to struct with validation
+
 ### Protocol (`lib/crispkey/sync/protocol.ex`)
 
-Wire protocol messages. All messages are JSON with 4-byte length prefix.
+Wire protocol encoding/decoding. Delegates to Message module.
 
 **Message format:**
 ```
 [4 bytes: length as 32-bit big-endian][JSON payload]
 ```
 
-**Message types:**
-- `hello` - Device handshake
-- `auth` - Sync password hash (SHA256)
-- `auth_ok` / `auth_fail` - Authentication result
-- `inventory` - List of keys with fingerprint, type, modified
-- `request` - Request specific keys by fingerprint
-- `key_data` - Actual key data (public or secret)
-- `ack` - Acknowledgment
-- `goodbye` - Connection close
-
-**Example:**
-```json
-{"type":"hello","version":1,"device_id":"d60d84530ad8ab5b"}
-```
+**Security:** Uses explicit key atomization to prevent atom table exhaustion attacks. Never uses `keys: :atoms` with untrusted input.
 
 ### Discovery (`lib/crispkey/sync/discovery.ex`)
 
@@ -183,23 +197,29 @@ Client-side sync connection. Direct TCP connection without GenServer.
 
 ### Local State (`lib/crispkey/store/local_state.ex`)
 
-Persistent state GenServer backed by `~/.config/crispkey/state.json`.
+Persistent state GenServer backed by `~/.config/crispkey/state.json`. Uses typed structs from `types.ex`.
 
-**State:**
+**State struct (`Crispkey.Store.State`):**
 ```elixir
-%{
+%Crispkey.Store.State{
   device_id: "d60d84530ad8ab5b",
   initialized: true,
   sync_password_hash: "base64_sha256_hash",
   peers: %{
-    "0e22bd906189c13a" => %{id: "...", host: "192.168.1.40", port: 4829, paired_at: "..."}
+    "0e22bd906189c13a" => %Crispkey.Store.Peer{id: "...", host: "192.168.1.40", port: 4829, paired_at: ~U[...]}
   },
   key_syncs: %{
-    "fingerprint" => %{"peer_id" => timestamp}
+    "fingerprint" => %{"peer_id" => ~U[...]}
   },
-  last_sync: timestamp
+  last_sync: ~U[...]
 }
 ```
+
+**Peer struct (`Crispkey.Store.Peer`):**
+- `id` - Device identifier (string)
+- `host` - IP address or hostname
+- `port` - Sync port number
+- `paired_at` - DateTime of pairing
 
 **Functions:**
 - `get_state/0`, `update_state/1`
@@ -414,11 +434,53 @@ config :crispkey,
 From `mix.exs`:
 - `jason` - JSON encoding/decoding
 - `ranch` - TCP acceptor pool (for Listener)
+- `norm` - Data validation and contracts
+
+Dev dependencies:
+- `dialyxir` - Static type checking with dialyzer
+- `credo` - Code quality linting
+- `proper` - Property-based testing
 
 Built-in Erlang:
 - `:crypto` - PBKDF2, AES-GCM, SHA256
 - `:gen_tcp` - TCP connections
 - `:gen_udp` - UDP multicast
+
+## Type Safety
+
+The codebase uses typed structs and `@spec` annotations throughout:
+
+**GPG Types (`lib/crispkey/gpg/types.ex`):**
+- `Crispkey.GPG.Key` - Public/secret key representation
+- `Crispkey.GPG.UID` - User identity
+- `Crispkey.GPG.Subkey` - Subkey information
+
+**Store Types (`lib/crispkey/store/types.ex`):**
+- `Crispkey.Store.State` - Application state
+- `Crispkey.Store.Peer` - Paired device info
+
+**Sync Messages (`lib/crispkey/sync/message.ex`):**
+- All wire protocol messages as typed structs (`Hello`, `Auth`, `Inventory`, etc.)
+
+**Security:** JSON parsing uses explicit key atomization to prevent atom table exhaustion DoS attacks. Never uses `keys: :atoms` with untrusted input.
+
+## Type Safety
+
+The codebase uses typed structs and `@spec` annotations throughout:
+
+**GPG Types (`lib/crispkey/gpg/types.ex`):**
+- `Crispkey.GPG.Key` - Public/secret key representation
+- `Crispkey.GPG.UID` - User identity
+- `Crispkey.GPG.Subkey` - Subkey information
+
+**Store Types (`lib/crispkey/store/types.ex`):**
+- `Crispkey.Store.State` - Application state
+- `Crispkey.Store.Peer` - Paired device info
+
+**Sync Messages (`lib/crispkey/sync/message.ex`):**
+- All wire protocol messages as typed structs
+
+**Security:** JSON parsing uses explicit key atomization to prevent atom table exhaustion DoS attacks. Never use `keys: :atoms` with untrusted input.
 
 ## Known Limitations
 

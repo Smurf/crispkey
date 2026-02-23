@@ -9,7 +9,11 @@ defmodule Crispkey.MixProject do
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       escript: [main_module: Crispkey.CLI],
-      elixirc_paths: elixirc_paths(Mix.env())
+      elixirc_paths: elixirc_paths(Mix.env()),
+      dialyzer: [
+        plt_add_apps: [:mix],
+        flags: [:unmatched_returns, :error_handling, :race_conditions]
+      ]
     ]
   end
 
@@ -23,7 +27,11 @@ defmodule Crispkey.MixProject do
   defp deps do
     [
       {:jason, "~> 1.4"},
-      {:ranch, "~> 2.1"}
+      {:ranch, "~> 2.1"},
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:norm, "~> 0.13"},
+      {:proper, "~> 1.4", only: [:dev, :test]}
     ]
   end
 

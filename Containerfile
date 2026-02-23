@@ -18,7 +18,7 @@ RUN mix local.hex --force && \
 # Copy source and build
 COPY lib ./lib
 COPY config ./config
-RUN mix escript.build
+RUN MIX_ENV=prod mix escript.build
 
 # Stage 2: Minimal runtime
 FROM docker.io/alpine:3.19

@@ -1,30 +1,48 @@
 defmodule Crispkey.Sync.Listener do
+  @moduledoc """
+  TCP listener for incoming sync connections.
+  """
+
   use GenServer
 
+  @type state :: %{
+          listen_socket: :gen_tcp.socket(),
+          connections: %{String.t() => pid()},
+          port: non_neg_integer()
+        }
+
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(_opts) do
     GenServer.start_link(__MODULE__, [], name: __MODULE__)
   end
 
+  @spec connect(String.t(), non_neg_integer() | nil) :: {:ok, pid()} | {:error, term()}
   def connect(host, port \\ nil) do
-    GenServer.call(__MODULE__, {:connect, host, port || Application.get_env(:crispkey, :sync_port, 4829)})
+    GenServer.call(
+      __MODULE__,
+      {:connect, host, port || Application.get_env(:crispkey, :sync_port, 4829)}
+    )
   end
 
+  @spec sync_with(String.t()) :: :ok | {:error, term()}
   def sync_with(peer_id) do
     GenServer.call(__MODULE__, {:sync_with, peer_id}, 60_000)
   end
 
   @impl true
+  @spec init([]) :: {:ok, state()}
   def init([]) do
     port = Application.get_env(:crispkey, :sync_port, 4829)
-    
-    {:ok, listen_socket} = :gen_tcp.listen(port, [
-      :binary,
-      {:active, false},
-      {:reuseaddr, true}
-    ])
-    
+
+    {:ok, listen_socket} =
+      :gen_tcp.listen(port, [
+        :binary,
+        {:active, false},
+        {:reuseaddr, true}
+      ])
+
     send(self(), :accept)
-    
+
     {:ok, %{listen_socket: listen_socket, connections: %{}, port: port}}
   end
 
@@ -35,12 +53,14 @@ defmodule Crispkey.Sync.Listener do
         case Crispkey.Sync.Peer.start(socket) do
           {:ok, peer_pid} ->
             :gen_tcp.controlling_process(socket, peer_pid)
+
           _ ->
             :ok
         end
+
         send(self(), :accept)
         {:noreply, state}
-      
+
       {:error, :timeout} ->
         send(self(), :accept)
         {:noreply, state}
@@ -67,11 +87,12 @@ defmodule Crispkey.Sync.Listener do
           {:ok, peer_pid} ->
             :gen_tcp.controlling_process(socket, peer_pid)
             {:reply, {:ok, peer_pid}, state}
+
           {:error, reason} ->
             :gen_tcp.close(socket)
             {:reply, {:error, reason}, state}
         end
-      
+
       {:error, reason} ->
         {:reply, {:error, reason}, state}
     end

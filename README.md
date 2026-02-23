@@ -268,6 +268,7 @@ GPG keys remain in the standard `~/.gnupg` directory.
 - **Passphrase**: Never stored; derived key cached only in memory
 - **Transport**: Sync traffic is encrypted with per-session keys
 - **Self-Discovery Prevention**: Device ignores its own discovery announcements
+- **Type Safety**: All wire protocol messages use typed structs with safe atomization to prevent DoS attacks
 
 ## Troubleshooting
 
@@ -295,6 +296,12 @@ mix deps.get
 
 # Build escript
 mix escript.build
+
+# Run type checking
+mix dialyzer
+
+# Run code quality checks
+mix credo
 
 # Run tests
 mix test

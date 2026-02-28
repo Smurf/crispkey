@@ -43,7 +43,8 @@ defmodule Crispkey.Sync.Connection do
 
   @spec handshake(:gen_tcp.socket()) :: {:ok, connection()} | {:error, term()}
   defp handshake(socket) do
-    msg = Protocol.hello_v2(Crispkey.device_id(), generate_session_id())
+    my_session_id = generate_session_id()
+    msg = Protocol.hello_v2(Crispkey.device_id(), my_session_id)
     data = Protocol.encode(msg)
 
     case :gen_tcp.send(socket, data) do
@@ -52,12 +53,14 @@ defmodule Crispkey.Sync.Connection do
     end
 
     case recv_raw(socket) do
-      {:ok, %{"type" => "hello", "session_id" => session_id_b64}} ->
-        {:ok, session_id} = Base.decode64(session_id_b64)
-        {:ok, %{socket: socket, peer_id: nil, session_id: session_id, session: nil}}
+      {:ok, response} ->
+        case response do
+          %{"type" => "hello", "device_id" => device_id} ->
+            {:ok, %{socket: socket, peer_id: device_id, session_id: my_session_id, session: nil}}
 
-      {:ok, %{"type" => "hello"}} ->
-        {:ok, %{socket: socket, peer_id: nil, session_id: nil, session: nil}}
+          _ ->
+            {:error, :handshake_failed}
+        end
 
       {:error, reason} ->
         :gen_tcp.close(socket)
@@ -67,7 +70,8 @@ defmodule Crispkey.Sync.Connection do
 
   @spec sync(connection(), String.t()) :: :ok | {:error, term()}
   def sync(conn, sync_password) do
-    session = Session.create_with_id(sync_password, conn.session_id)
+    password_hash = :crypto.hash(:sha256, sync_password)
+    session = Session.create_with_id(password_hash, conn.session_id)
     conn = %{conn | session: session}
 
     with :ok <- authenticate(conn),

@@ -164,24 +164,58 @@ defmodule Crispkey.Sync.Peer do
   @spec server_handshake(state()) :: {:ok, state()} | {:error, term()}
   defp server_handshake(state) do
     case recv_raw(state) do
-      {:ok, %{"type" => "hello", "session_id" => session_id_b64, "device_id" => device_id}, state} ->
-        {:ok, session_id} = Base.decode64(session_id_b64)
-        my_session_id = generate_session_id()
+      {:ok, msg, state} ->
+        result =
+          case msg do
+            %{type: "hello", session_id: session_id_b64, device_id: device_id} ->
+              {:ok, session_id} = Base.decode64(session_id_b64)
+              {:ok, device_id, session_id}
 
-        msg = Protocol.hello_v2(Crispkey.device_id(), my_session_id)
-        data = Protocol.encode(msg)
+            %{"type" => "hello", "session_id" => session_id_b64, "device_id" => device_id} ->
+              {:ok, session_id} = Base.decode64(session_id_b64)
+              {:ok, device_id, session_id}
 
-        case :gen_tcp.send(state.socket, data) do
-          :ok -> :ok
-          {:error, reason} -> Logger.error("Failed to send hello: #{inspect(reason)}")
+            _ ->
+              {:error, :handshake_failed, nil, nil}
+          end
+
+        case result do
+          {:ok, device_id, session_id} ->
+            my_session_id = generate_session_id()
+
+            msg = Protocol.hello_v2(Crispkey.device_id(), my_session_id)
+            data = Protocol.encode(msg)
+
+            case :gen_tcp.send(state.socket, data) do
+              :ok -> :ok
+              {:error, reason} -> Logger.error("Failed to send hello: #{inspect(reason)}")
+            end
+
+            case :inet.setopts(state.socket, [{:active, true}]) do
+              :ok -> :ok
+              {:error, reason} -> Logger.error("Failed to set socket options: #{inspect(reason)}")
+            end
+
+            peer_ip =
+              case :inet.peername(state.socket) do
+                {:ok, {ip, _port}} -> :inet.ntoa(ip) |> to_string()
+                {:error, _} -> nil
+              end
+
+            if peer_ip do
+              LocalState.add_peer(%{
+                id: device_id,
+                host: peer_ip,
+                port: Application.get_env(:crispkey, :sync_port, 4829),
+                paired_at: DateTime.utc_now()
+              })
+            end
+
+            {:ok, %{state | peer_id: device_id, session_id: session_id}}
+
+          {:error, reason, _device_id, _session_id} ->
+            {:error, reason}
         end
-
-        case :inet.setopts(state.socket, [{:active, true}]) do
-          :ok -> :ok
-          {:error, reason} -> Logger.error("Failed to set socket options: #{inspect(reason)}")
-        end
-
-        {:ok, %{state | peer_id: device_id, session_id: session_id}}
 
       {:error, reason} ->
         {:error, reason}
@@ -196,7 +230,10 @@ defmodule Crispkey.Sync.Peer do
       LocalState.get_state().sync_password_hash
       |> Base.decode64!()
 
+    IO.puts("[PEER] Password hash: #{Base.encode64(sync_password)}")
+    IO.puts("[PEER] Session id for key derivation: #{Base.encode64(state.session_id)}")
     session = Session.create_with_id(sync_password, state.session_id)
+    IO.puts("[PEER] Derived session_key: #{Base.encode64(session.session_key)}")
 
     if Session.verify_auth_token(session, token) do
       IO.puts("[PEER] Auth succeeded")
@@ -287,6 +324,48 @@ defmodule Crispkey.Sync.Peer do
   end
 
   @spec decode_message(binary(), state()) :: {:ok, map(), state()} | {:error, term()}
+  defp decode_message(binary, %{session: nil, session_id: session_id} = state)
+       when session_id != nil do
+    IO.puts("[PEER] decode_message with session_id, binary size: #{byte_size(binary)}")
+
+    case Protocol.decode(binary) do
+      {:ok, %_{} = msg} ->
+        IO.puts("[PEER] Decoded as struct")
+        {:ok, Message.to_wire(msg), state}
+
+      {:ok, map} when is_map(map) ->
+        IO.puts("[PEER] Decoded as map: #{inspect(map)}")
+        {:ok, map, state}
+
+      {:error, _} ->
+        local_state = LocalState.get_state()
+
+        if local_state.sync_password_hash do
+          sync_password = Base.decode64!(local_state.sync_password_hash)
+          IO.puts("[PEER] decode_message password hash: #{Base.encode64(sync_password)}")
+          IO.puts("[PEER] decode_message session_id: #{Base.encode64(session_id)}")
+          session = Session.create_with_id(sync_password, session_id)
+
+          IO.puts(
+            "[PEER] decode_message derived session_key: #{Base.encode64(session.session_key)}"
+          )
+
+          case Protocol.decode_encrypted(binary, session) do
+            {:ok, msg, session} ->
+              IO.puts("[PEER] Decoded encrypted successfully using hash as password")
+              {:ok, msg, %{state | session: session}}
+
+            {:error, reason} ->
+              IO.puts("[PEER] Encrypted decode failed with hash: #{inspect(reason)}")
+              {:error, reason}
+          end
+        else
+          IO.puts("[PEER] No sync password hash available")
+          {:error, :not_initialized}
+        end
+    end
+  end
+
   defp decode_message(binary, %{session: nil} = state) do
     case Protocol.decode(binary) do
       {:ok, %_{} = msg} ->

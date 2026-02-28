@@ -18,30 +18,6 @@ error() {
     echo "[$(date '+%H:%M:%S')] ERROR: $1" >&2
 }
 
-cleanup() {
-    log "Cleaning up before test execution..."
-    
-    # Stop and remove containers
-    podman stop "$ALICE" "$BOB" 2>/dev/null || true
-    podman rm "$ALICE" "$BOB" 2>/dev/null || true
-    
-    # Clear volumes
-    rm -rf "$PROJECT_DIR/test-volumes/alice/config"/* 2>/dev/null || true
-    rm -rf "$PROJECT_DIR/test-volumes/bob/config"/* 2>/dev/null || true
-    mkdir -p "$PROJECT_DIR/test-volumes/alice/config"
-    mkdir -p "$PROJECT_DIR/test-volumes/bob/config"
-    
-    # Rebuild containers
-    log "Rebuilding containers..."
-    podman build -f "$PROJECT_DIR/Containerfile" -t crispkey:latest
-    
-    # Create and start containers
-    podman-compose -f "$PROJECT_DIR/docker-compose.podman.yml" up -d
-    sleep 3
-    
-    log "Cleanup and rebuild complete"
-}
-
 exec_in() {
     local container=$1
     shift
@@ -80,7 +56,7 @@ unlock_vaults() {
     exec_in "$container" expect -c "
         spawn crispkey unlock
         expect \"master password\"
-        send \"$MASTER_PASSWORD\\r\"
+        send \"$MASTER_PASSWORD\r\"
         expect eof
     " 2>/dev/null || true
 }
@@ -88,7 +64,6 @@ unlock_vaults() {
 test_sync() {
     log "Testing vault sync..."
     
-    # Get Alice's device ID
     local alice_id
     alice_id=$(get_device_id "$ALICE")
     
@@ -99,7 +74,6 @@ test_sync() {
     
     log "Alice device ID: $alice_id"
     
-    # Count vaults before sync
     local alice_vaults_before bob_vaults_before
     alice_vaults_before=$(count_vaults "$ALICE")
     bob_vaults_before=$(count_vaults "$BOB")
@@ -111,33 +85,31 @@ test_sync() {
         return 1
     fi
     
-    # Get Alice's IP
     local alice_ip
     alice_ip=$(get_alice_ip)
     
     log "Alice IP: $alice_ip"
     
-    # Pair Bob with Alice first
     log "Pairing Bob with Alice..."
     exec_in "$BOB" crispkey pair "$alice_ip" 2>&1 || true
     
-    # Unlock Bob's vaults
+    log "Unlocking Alice's vaults..."
+    unlock_vaults "$ALICE"
+    
     log "Unlocking Bob's vaults..."
     unlock_vaults "$BOB"
     
-    # Run sync (Bob pulls from Alice)
     log "Running sync from Bob (pulling from Alice)..."
     local sync_output
     sync_output=$(exec_in "$BOB" expect -c "
         spawn crispkey sync $alice_id
         expect \"sync password\"
-        send \"$SYNC_PASSWORD\\r\"
+        send \"$SYNC_PASSWORD\r\"
         expect eof
     " 2>&1 || true)
     
     log "Sync output: $sync_output"
     
-    # Count vaults after sync
     sleep 1
     local bob_vaults_after
     bob_vaults_after=$(count_vaults "$BOB")
@@ -156,10 +128,9 @@ test_sync() {
 test_vault_integrity() {
     log "Testing vault integrity..."
     
-    # Get fingerprints from both containers
     local alice_fps bob_fps
     alice_fps=$(get_alice_vault_fps)
-    bob_fps=$(exec_in "$BOB" ls /home/testuser/.config/crispkey/vaults/*.vault 2>/dev/null | xargs -I{} basename {} .vault | sort || true)
+    bob_fps=$(exec_in "$BOB" sh -c 'ls /home/testuser/.config/crispkey/vaults/*.vault 2>/dev/null' | xargs -I{} basename {} .vault | sort || true)
     
     if [ -z "$alice_fps" ]; then
         error "No vaults found in Alice"
@@ -176,7 +147,6 @@ test_vault_integrity() {
         [ -n "$fp" ] && log "  $fp"
     done
     
-    # Check if all Alice's vaults are in Bob
     local all_found=true
     while read fp; do
         if [ -n "$fp" ] && ! echo "$bob_fps" | grep -q "$fp"; then
@@ -197,7 +167,6 @@ test_vault_integrity() {
 test_vault_decryption() {
     log "Testing vault decryption..."
     
-    # Unlock Bob's vaults and list them
     unlock_vaults "$BOB"
     
     local vault_list
@@ -208,7 +177,7 @@ test_vault_decryption() {
         log "  $line"
     done
     
-    if echo "$vault_list" | grep -q "fingerprint"; then
+    if echo "$vault_list" | grep -q "Size:"; then
         log "Decryption: PASS - Vaults can be listed"
         return 0
     else
@@ -219,9 +188,11 @@ test_vault_decryption() {
 
 main() {
     log "Starting vault sync tests..."
-    
-    # Cleanup before starting
-    cleanup
+    echo $1
+    if [ $1 != "NOBUILD" ]
+    then
+      "$SCRIPT_DIR/rebuild-containers.sh"
+    fi
     
     local failures=0
     

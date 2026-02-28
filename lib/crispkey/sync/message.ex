@@ -185,55 +185,55 @@ defmodule Crispkey.Sync.Message do
   """
   @spec to_wire(t()) :: map()
   def to_wire(%Hello{device_id: device_id, version: version, session_id: session_id}) do
-    map = %{type: "hello", device_id: device_id, version: version}
+    map = %{"type" => "hello", "device_id" => device_id, "version" => version}
 
     if session_id do
-      Map.put(map, :session_id, Base.encode64(session_id))
+      Map.put(map, "session_id", Base.encode64(session_id))
     else
       map
     end
   end
 
   def to_wire(%Auth{password_hash: hash}) do
-    %{type: "auth", password_hash: hash}
+    %{"type" => "auth", "password_hash" => hash}
   end
 
   def to_wire(%AuthOk{}) do
-    %{type: "auth_ok"}
+    %{"type" => "auth_ok"}
   end
 
   def to_wire(%AuthFail{}) do
-    %{type: "auth_fail"}
+    %{"type" => "auth_fail"}
   end
 
   def to_wire(%Inventory{keys: keys}) do
-    %{type: "inventory", keys: keys}
+    %{"type" => "inventory", "keys" => keys}
   end
 
   def to_wire(%Request{fingerprints: fps, types: types}) do
-    %{type: "request", fingerprints: fps, types: Enum.map(types, &Atom.to_string/1)}
+    %{"type" => "request", "fingerprints" => fps, "types" => Enum.map(types, &Atom.to_string/1)}
   end
 
   def to_wire(%KeyData{fingerprint: fp, key_type: type, data: data, metadata: meta}) do
     %{
-      type: "key_data",
-      fingerprint: fp,
-      key_type: Atom.to_string(type),
-      data: data,
-      metadata: meta
+      "type" => "key_data",
+      "fingerprint" => fp,
+      "key_type" => Atom.to_string(type),
+      "data" => data,
+      "metadata" => meta
     }
   end
 
   def to_wire(%TrustData{data: data}) do
-    %{type: "trust_data", data: data}
+    %{"type" => "trust_data", "data" => data}
   end
 
   def to_wire(%Ack{fingerprint: fp, status: status}) do
-    %{type: "ack", fingerprint: fp, status: maybe_atom_to_string(status)}
+    %{"type" => "ack", "fingerprint" => fp, "status" => maybe_atom_to_string(status)}
   end
 
   def to_wire(%Goodbye{reason: reason}) do
-    %{type: "goodbye", reason: maybe_atom_to_string(reason)}
+    %{"type" => "goodbye", "reason" => maybe_atom_to_string(reason)}
   end
 
   @doc """

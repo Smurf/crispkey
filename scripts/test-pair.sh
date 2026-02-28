@@ -7,6 +7,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 ALICE="crispkey-alice"
 BOB="crispkey-bob"
+MASTER_PASSWORD="testmaster123"
 
 log() {
     echo "[$(date '+%H:%M:%S')] $1"
@@ -16,34 +17,10 @@ error() {
     echo "[$(date '+%H:%M:%S')] ERROR: $1" >&2
 }
 
-cleanup() {
-    log "Cleaning up before test execution..."
-    
-    # Stop and remove containers
-    podman stop "$ALICE" "$BOB" 2>/dev/null || true
-    podman rm "$ALICE" "$BOB" 2>/dev/null || true
-    
-    # Clear volumes
-    rm -rf "$PROJECT_DIR/test-volumes/alice/config"/* 2>/dev/null || true
-    rm -rf "$PROJECT_DIR/test-volumes/bob/config"/* 2>/dev/null || true
-    mkdir -p "$PROJECT_DIR/test-volumes/alice/config"
-    mkdir -p "$PROJECT_DIR/test-volumes/bob/config"
-    
-    # Rebuild containers
-    log "Rebuilding containers..."
-    podman build -f "$PROJECT_DIR/Containerfile" -t crispkey:latest
-    
-    # Create and start containers
-    podman-compose -f "$PROJECT_DIR/docker-compose.podman.yml" up -d
-    sleep 3
-    
-    log "Cleanup and rebuild complete"
-}
-
 exec_in() {
     local container=$1
     shift
-    podman exec -u testuser -e HOME=/home/testuser -e GNUPGHOME=/home/testuser/.gnupg "$container" "$@"
+    podman exec -u testuser -e HOME=/home/testuser -e GNUPGHOME=/home/testuser/.gnupg -e CRISPKEY_DATA_DIR=/home/testuser/.config/crispkey -e CRISPKEY_MASTER_PASSWORD="$MASTER_PASSWORD" "$container" "$@"
 }
 
 get_device_id() {
@@ -52,14 +29,12 @@ get_device_id() {
 }
 
 get_bob_ip() {
-    # Get Bob's IP on the test network
     podman inspect "$BOB" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null || echo ""
 }
 
 test_discovery() {
     log "Testing discovery from Alice..."
     
-    # Run discovery from Alice, look for Bob
     local output
     output=$(exec_in "$ALICE" crispkey discover 3 2>&1 || true)
     
@@ -74,10 +49,15 @@ test_discovery() {
     fi
 }
 
+get_alice_ip() {
+    podman inspect "$ALICE" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null || echo ""
+}
+
 test_pairing() {
     log "Testing pairing..."
     
-    local bob_id
+    local alice_id bob_id
+    alice_id=$(get_device_id "$ALICE")
     bob_id=$(get_device_id "$BOB")
     
     if [ -z "$bob_id" ]; then
@@ -85,27 +65,32 @@ test_pairing() {
         return 1
     fi
     
-    log "Bob's device ID: $bob_id"
-    
-    # Pair from Alice to Bob (by IP since we know it)
-    local bob_ip
-    bob_ip=$(get_bob_ip)
-    
-    if [ -z "$bob_ip" ]; then
-        error "Could not get Bob's IP address"
+    if [ -z "$alice_id" ]; then
+        error "Could not get Alice's device ID"
         return 1
     fi
     
-    log "Bob's IP: $bob_ip"
+    log "Alice's device ID: $alice_id"
+    log "Bob's device ID: $bob_id"
     
-    # Pair Alice -> Bob
-    log "Pairing Alice -> Bob..."
+    local alice_ip
+    alice_ip=$(get_alice_ip)
+    
+    if [ -z "$alice_ip" ]; then
+        error "Could not get Alice's IP address"
+        return 1
+    fi
+    
+    log "Alice's IP: $alice_ip"
+    
+    log "Pairing Bob with Alice..."
     local pair_output
-    pair_output=$(exec_in "$ALICE" crispkey pair "$bob_ip" 2>&1 || true)
+    pair_output=$(exec_in "$BOB" crispkey pair "$alice_ip" 2>&1 || true)
     
     log "Pair output: $pair_output"
     
-    # Verify pairing in Alice's state
+    sleep 1
+    
     local peers
     peers=$(exec_in "$ALICE" crispkey devices 2>&1 || true)
     
@@ -123,8 +108,10 @@ test_pairing() {
 main() {
     log "Starting pairing tests..."
     
-    # Cleanup before starting
-    cleanup
+    if [ $1 != "NOBUILD"]
+    then
+      "$SCRIPT_DIR/rebuild-containers.sh"
+    fi
     
     local failures=0
     

@@ -40,10 +40,10 @@ defmodule Crispkey.Sync.Protocol do
   @spec hello_v2(String.t(), binary()) :: map()
   def hello_v2(device_id, session_id) do
     %{
-      type: "hello",
-      device_id: device_id,
-      version: @version,
-      session_id: Base.encode64(session_id)
+      "type" => "hello",
+      "device_id" => device_id,
+      "version" => @version,
+      "session_id" => Base.encode64(session_id)
     }
   end
 
@@ -52,7 +52,27 @@ defmodule Crispkey.Sync.Protocol do
 
   @spec auth_token(String.t()) :: map()
   def auth_token(token) do
-    %{type: "auth_token", token: token}
+    %{"type" => "auth_token", "token" => token}
+  end
+
+  @spec manifest_request() :: map()
+  def manifest_request do
+    %{"type" => "manifest_request"}
+  end
+
+  @spec manifest(map()) :: map()
+  def manifest(manifest_data) do
+    %{"type" => "manifest", "data" => manifest_data}
+  end
+
+  @spec vault_request([String.t()]) :: map()
+  def vault_request(fingerprints) do
+    %{"type" => "vault_request", "fingerprints" => fingerprints}
+  end
+
+  @spec vault_data(String.t(), binary()) :: map()
+  def vault_data(fingerprint, vault_binary) do
+    %{"type" => "vault_data", "fingerprint" => fingerprint, "data" => Base.encode64(vault_binary)}
   end
 
   @spec auth_ok() :: Message.AuthOk.t()
@@ -60,26 +80,6 @@ defmodule Crispkey.Sync.Protocol do
 
   @spec auth_fail() :: Message.AuthFail.t()
   def auth_fail, do: Message.auth_fail()
-
-  @spec manifest_request() :: map()
-  def manifest_request do
-    %{type: "manifest_request"}
-  end
-
-  @spec manifest(map()) :: map()
-  def manifest(manifest_data) do
-    %{type: "manifest", data: manifest_data}
-  end
-
-  @spec vault_request([String.t()]) :: map()
-  def vault_request(fingerprints) do
-    %{type: "vault_request", fingerprints: fingerprints}
-  end
-
-  @spec vault_data(String.t(), binary()) :: map()
-  def vault_data(fingerprint, vault_binary) do
-    %{type: "vault_data", fingerprint: fingerprint, data: Base.encode64(vault_binary)}
-  end
 
   @spec inventory([map()]) :: Message.Inventory.t()
   def inventory(keys), do: Message.inventory(keys)

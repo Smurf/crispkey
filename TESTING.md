@@ -87,9 +87,6 @@ brew install podman podman-compose fswatch
 ## Quick Start
 
 ```bash
-# Build and start containers
-podman-compose -f docker-compose.podman.yml up -d --build
-
 # Run full test suite
 ./scripts/test-all.sh
 ```

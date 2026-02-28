@@ -104,7 +104,40 @@ defmodule Crispkey.Vault.Manager do
   @spec init(keyword()) :: {:ok, state()}
   def init(_opts) do
     File.mkdir_p!(vaults_dir())
-    {:ok, %{master_key: nil, master_salt: nil, manifest: nil, unlocked: false}}
+
+    state = try_auto_unlock(%{master_key: nil, master_salt: nil, manifest: nil, unlocked: false})
+
+    {:ok, state}
+  end
+
+  @spec try_auto_unlock(state()) :: state()
+  defp try_auto_unlock(state) do
+    case System.get_env("CRISPKEY_MASTER_PASSWORD") do
+      nil ->
+        state
+
+      password ->
+        case load_master_salt() do
+          {:ok, salt} ->
+            master_key = Crypto.derive_master_key(password, salt)
+
+            case load_manifest_encrypted(master_key, salt) do
+              {:ok, manifest} ->
+                %{
+                  master_key: master_key,
+                  master_salt: salt,
+                  manifest: manifest,
+                  unlocked: true
+                }
+
+              {:error, _} ->
+                state
+            end
+
+          {:error, _} ->
+            state
+        end
+    end
   end
 
   @impl true

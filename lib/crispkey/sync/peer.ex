@@ -6,6 +6,7 @@ defmodule Crispkey.Sync.Peer do
   use GenServer
 
   alias Crispkey.Sync.{Protocol, Session}
+  alias Crispkey.Store.LocalState
   alias Crispkey.Vault.{Manager, ManifestModule}
   alias Crispkey.Vault.Types.Session, as: SessionState
 
@@ -177,7 +178,7 @@ defmodule Crispkey.Sync.Peer do
     IO.puts("[PEER] Received auth token")
 
     sync_password =
-      Crispkey.Store.LocalState.get_state().sync_password_hash
+      LocalState.get_state().sync_password_hash
       |> Base.decode64!()
 
     session = Session.create_with_id(sync_password, state.session_id)
@@ -236,21 +237,10 @@ defmodule Crispkey.Sync.Peer do
 
   @spec recv_raw(state()) :: {:ok, map(), state()} | {:error, term()}
   defp recv_raw(state) do
-    case :gen_tcp.recv(state.socket, 4, 5000) do
-      {:ok, <<len::32>>} ->
-        case :gen_tcp.recv(state.socket, len, 5000) do
-          {:ok, data} ->
-            case Protocol.decode(<<len::32, data::binary>>) do
-              {:ok, msg} -> {:ok, msg, state}
-              {:error, reason} -> {:error, reason}
-            end
-
-          {:error, reason} ->
-            {:error, reason}
-        end
-
-      {:error, reason} ->
-        {:error, reason}
+    with {:ok, <<len::32>>} <- :gen_tcp.recv(state.socket, 4, 5000),
+         {:ok, data} <- :gen_tcp.recv(state.socket, len, 5000),
+         {:ok, msg} <- Protocol.decode(<<len::32, data::binary>>) do
+      {:ok, msg, state}
     end
   end
 
@@ -304,24 +294,11 @@ defmodule Crispkey.Sync.Peer do
     :gen_tcp.send(socket, data)
     state = %{state | session: session}
 
-    case :gen_tcp.recv(socket, 4, 10000) do
-      {:ok, <<len::32>>} ->
-        case :gen_tcp.recv(socket, len, 10000) do
-          {:ok, data} ->
-            case Protocol.decode_encrypted(<<len::32, data::binary>>, state.session) do
-              {:ok, %{"type" => "manifest", "data" => manifest_data}, session} ->
-                {:ok, ManifestModule.from_json(manifest_data), %{state | session: session}}
-
-              {:error, reason} ->
-                {:error, reason}
-            end
-
-          {:error, reason} ->
-            {:error, reason}
-        end
-
-      {:error, reason} ->
-        {:error, reason}
+    with {:ok, <<len::32>>} <- :gen_tcp.recv(socket, 4, 10_000),
+         {:ok, data} <- :gen_tcp.recv(socket, len, 10_000),
+         {:ok, %{"type" => "manifest", "data" => manifest_data}, session} <-
+           Protocol.decode_encrypted(<<len::32, data::binary>>, state.session) do
+      {:ok, ManifestModule.from_json(manifest_data), %{state | session: session}}
     end
   end
 
@@ -338,9 +315,9 @@ defmodule Crispkey.Sync.Peer do
 
     receive do
       {:tcp, _, _} ->
-        case :gen_tcp.recv(socket, 4, 30000) do
+        case :gen_tcp.recv(socket, 4, 30_000) do
           {:ok, <<len::32>>} ->
-            case :gen_tcp.recv(socket, len, 30000) do
+            case :gen_tcp.recv(socket, len, 30_000) do
               {:ok, data} ->
                 case Protocol.decode_encrypted(<<len::32, data::binary>>, session) do
                   {:ok, %{"type" => "vault_data", "fingerprint" => fp, "data" => data_b64}, _} ->
@@ -365,7 +342,7 @@ defmodule Crispkey.Sync.Peer do
             {:error, reason}
         end
     after
-      30000 -> {:error, :timeout}
+      30_000 -> {:error, :timeout}
     end
   end
 

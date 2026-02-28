@@ -12,7 +12,7 @@ defmodule Crispkey.MixProject do
       elixirc_paths: elixirc_paths(Mix.env()),
       dialyzer: [
         plt_add_apps: [:mix],
-        flags: [:unmatched_returns, :error_handling, :race_conditions]
+        flags: [:unmatched_returns, :error_handling]
       ]
     ]
   end

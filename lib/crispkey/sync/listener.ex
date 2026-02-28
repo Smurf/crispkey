@@ -5,6 +5,8 @@ defmodule Crispkey.Sync.Listener do
 
   use GenServer
 
+  alias Crispkey.Sync.Peer
+
   @type state :: %{
           listen_socket: :gen_tcp.socket(),
           connections: %{String.t() => pid()},
@@ -50,7 +52,7 @@ defmodule Crispkey.Sync.Listener do
   def handle_info(:accept, state) do
     case :gen_tcp.accept(state.listen_socket, 0) do
       {:ok, socket} ->
-        case Crispkey.Sync.Peer.start(socket) do
+        case Peer.start(socket) do
           {:ok, peer_pid} ->
             :gen_tcp.controlling_process(socket, peer_pid)
 
@@ -83,7 +85,7 @@ defmodule Crispkey.Sync.Listener do
   def handle_call({:connect, host, port}, _from, state) do
     case :gen_tcp.connect(String.to_charlist(host), port, [:binary, {:active, false}], 5000) do
       {:ok, socket} ->
-        case Crispkey.Sync.Peer.start(socket, is_client: true) do
+        case Peer.start(socket, is_client: true) do
           {:ok, peer_pid} ->
             :gen_tcp.controlling_process(socket, peer_pid)
             {:reply, {:ok, peer_pid}, state}
@@ -99,7 +101,7 @@ defmodule Crispkey.Sync.Listener do
   end
 
   def handle_call({:sync_with, peer_id}, _from, state) do
-    result = Crispkey.Sync.Peer.sync(peer_id)
+    result = Peer.sync(peer_id)
     {:reply, result, state}
   end
 end

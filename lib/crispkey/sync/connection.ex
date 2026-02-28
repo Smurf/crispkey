@@ -183,7 +183,7 @@ defmodule Crispkey.Sync.Connection do
 
   @spec recv_encrypted(:gen_tcp.socket(), SessionState.t(), non_neg_integer()) ::
           {:ok, map(), SessionState.t()} | {:error, term()}
-  defp recv_encrypted(socket, session, timeout \\ 10000) do
+  defp recv_encrypted(socket, session, timeout \\ 10_000) do
     case :gen_tcp.recv(socket, 4, timeout) do
       {:ok, <<len::32>>} ->
         case :gen_tcp.recv(socket, len, timeout) do

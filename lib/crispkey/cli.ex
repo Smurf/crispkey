@@ -3,6 +3,10 @@ defmodule Crispkey.CLI do
   Command-line interface for crispkey.
   """
 
+  alias Crispkey.{Crypto, Store}
+  alias Crispkey.GPG.Interface, as: GPGInterface
+  alias Crispkey.Store.{LocalState, Peers}
+  alias Crispkey.Sync.{Connection, Daemon, Discovery, Listener}
   alias Crispkey.Vault.Manager
 
   @spec main([String.t()]) :: no_return()
@@ -88,8 +92,8 @@ defmodule Crispkey.CLI do
 
     :ok = Manager.initialize(passphrase)
 
-    Crispkey.Store.LocalState.update_state(fn s -> %{s | initialized: true} end)
-    Crispkey.Store.LocalState.set_sync_password(sync_password)
+    Store.LocalState.update_state(fn s -> %{s | initialized: true} end)
+    Store.LocalState.set_sync_password(sync_password)
 
     IO.puts("Initialized successfully.")
     IO.puts("Device ID: #{Crispkey.device_id()}")
@@ -117,10 +121,6 @@ defmodule Crispkey.CLI do
       {:error, :invalid_password} ->
         IO.puts("Invalid password")
         System.halt(1)
-
-      {:error, :not_initialized} ->
-        IO.puts("Vault system not initialized. Run 'crispkey init' first.")
-        System.halt(1)
     end
   end
 
@@ -133,7 +133,7 @@ defmodule Crispkey.CLI do
 
   @spec status() :: no_return()
   defp status do
-    state = Crispkey.Store.LocalState.get_state()
+    state = Store.LocalState.get_state()
     vault_unlocked = Manager.unlocked?()
 
     IO.puts("Device ID: #{state.device_id}")
@@ -167,12 +167,7 @@ defmodule Crispkey.CLI do
 
       {:ok, vaults} ->
         IO.puts("Vaults:")
-
-        Enum.each(vaults, fn entry ->
-          secret_status = if entry.has_secret, do: "[secret]", else: "[public only]"
-          IO.puts("  #{entry.fingerprint} #{secret_status}")
-          IO.puts("    Size: #{entry.size} bytes, Modified: #{entry.modified}")
-        end)
+        Enum.each(vaults, &print_vault_entry/1)
     end
 
     System.halt(0)
@@ -181,16 +176,16 @@ defmodule Crispkey.CLI do
   defp vault_cmd(["import", fingerprint | _]) do
     ensure_unlocked!()
 
-    with {:ok, pub_data} <- Crispkey.GPG.Interface.export_public_key(fingerprint),
-         {:ok, sec_data} <- Crispkey.GPG.Interface.export_secret_key(fingerprint),
-         {:ok, trust_data} <- Crispkey.GPG.Interface.export_trustdb() do
+    with {:ok, pub_data} <- GPGInterface.export_public_key(fingerprint),
+         {:ok, sec_data} <- GPGInterface.export_secret_key(fingerprint),
+         {:ok, trust_data} <- GPGInterface.export_trustdb() do
       :ok = Manager.create_vault(fingerprint, pub_data, sec_data, trust_data)
       IO.puts("Imported key #{fingerprint} to vault")
     else
-      {:error, {:no_secret_key, _}} ->
-        case Crispkey.GPG.Interface.export_public_key(fingerprint) do
+      {:error, {2, _}} ->
+        case GPGInterface.export_public_key(fingerprint) do
           {:ok, pub_data} ->
-            {:ok, trust_data} = Crispkey.GPG.Interface.export_trustdb()
+            {:ok, trust_data} = GPGInterface.export_trustdb()
             :ok = Manager.create_vault(fingerprint, pub_data, nil, trust_data)
             IO.puts("Imported public key #{fingerprint} to vault (no secret key)")
 
@@ -216,7 +211,7 @@ defmodule Crispkey.CLI do
 
         results =
           if vault.public_key do
-            case Crispkey.GPG.Interface.import_key(vault.public_key) do
+            case GPGInterface.import_key(vault.public_key) do
               {:ok, _} -> [{:public, :ok} | results]
               {:error, reason} -> [{:public, {:error, reason}} | results]
             end
@@ -226,7 +221,7 @@ defmodule Crispkey.CLI do
 
         results =
           if vault.secret_key do
-            case Crispkey.GPG.Interface.import_key(vault.secret_key) do
+            case GPGInterface.import_key(vault.secret_key) do
               {:ok, _} -> [{:secret, :ok} | results]
               {:error, reason} -> [{:secret, {:error, reason}} | results]
             end
@@ -236,7 +231,7 @@ defmodule Crispkey.CLI do
 
         results =
           if vault.trust do
-            case Crispkey.GPG.Interface.import_trustdb(vault.trust) do
+            case GPGInterface.import_trustdb(vault.trust) do
               {:ok, _} -> [{:trust, :ok} | results]
               {:error, reason} -> [{:trust, {:error, reason}} | results]
             end
@@ -286,6 +281,12 @@ defmodule Crispkey.CLI do
     System.halt(1)
   end
 
+  defp print_vault_entry(entry) do
+    secret_status = if entry.has_secret, do: "[secret]", else: "[public only]"
+    IO.puts("  #{entry.fingerprint} #{secret_status}")
+    IO.puts("    Size: #{entry.size} bytes, Modified: #{entry.modified}")
+  end
+
   @spec ensure_unlocked!() :: :ok
   defp ensure_unlocked! do
     unless Manager.unlocked?() do
@@ -298,7 +299,7 @@ defmodule Crispkey.CLI do
 
   @spec list_keys() :: no_return()
   defp list_keys do
-    case Crispkey.GPG.Interface.list_public_keys() do
+    case GPGInterface.list_public_keys() do
       {:ok, pub_keys} ->
         IO.puts("\nPublic keys in GPG keyring:")
         Enum.each(pub_keys, &print_key/1)
@@ -307,7 +308,7 @@ defmodule Crispkey.CLI do
         IO.puts("Error listing public keys: #{msg}")
     end
 
-    case Crispkey.GPG.Interface.list_secret_keys() do
+    case GPGInterface.list_secret_keys() do
       {:ok, sec_keys} ->
         IO.puts("\nSecret keys in GPG keyring:")
         Enum.each(sec_keys, &print_key/1)
@@ -332,7 +333,7 @@ defmodule Crispkey.CLI do
 
   @spec devices() :: no_return()
   defp devices do
-    peers = Crispkey.Store.LocalState.get_peers()
+    peers = LocalState.get_peers()
 
     if Enum.empty?(peers) do
       IO.puts("No paired devices. Use 'crispkey discover' and 'crispkey pair <id|host>'")
@@ -355,8 +356,8 @@ defmodule Crispkey.CLI do
     IO.puts("Listening for sync on port 4829")
     IO.puts("Press Ctrl+C to stop")
 
-    {:ok, _listener} = Crispkey.Sync.Listener.start_link([])
-    {:ok, _daemon} = Crispkey.Sync.Daemon.start_link([])
+    {:ok, _listener} = Listener.start_link([])
+    {:ok, _daemon} = Daemon.start_link([])
 
     Process.flag(:trap_exit, true)
 
@@ -378,12 +379,12 @@ defmodule Crispkey.CLI do
     IO.puts("Discovering devices (#{div(timeout, 1000)}s)...")
     IO.puts("Make sure 'crispkey daemon' is running on other devices.")
 
-    peers = Crispkey.Sync.Discovery.discover(timeout)
+    peers = Discovery.discover(timeout)
 
     if Enum.empty?(peers) do
       IO.puts("No devices found")
     else
-      Crispkey.Store.Peers.save(peers)
+      Peers.save(peers)
 
       IO.puts("Found #{length(peers)} device(s):")
 
@@ -401,9 +402,9 @@ defmodule Crispkey.CLI do
 
     IO.puts("Pairing with #{device_id} @ #{host}...")
 
-    case Crispkey.Sync.Connection.connect(host) do
+    case Connection.connect(host) do
       {:ok, %{peer_id: peer_id}} ->
-        Crispkey.Store.LocalState.add_peer(%{
+        LocalState.add_peer(%{
           id: peer_id,
           host: host,
           port: Application.get_env(:crispkey, :sync_port, 4829),
@@ -421,38 +422,40 @@ defmodule Crispkey.CLI do
 
   @spec resolve_target(String.t()) :: {String.t(), String.t()}
   defp resolve_target(target) do
-    if is_ip_address?(target) do
-      {target, target}
-    else
-      case Crispkey.Store.Peers.find(target) do
-        nil ->
-          if looks_like_device_id?(target) do
-            IO.puts("Device #{target} not found in recent discoveries.")
-            IO.puts("Run 'crispkey discover' first to find devices on your network.")
-            System.halt(1)
-          else
-            {target, target}
-          end
+    cond do
+      ip_address?(target) ->
+        {target, target}
 
-        peer ->
-          {peer.ip, peer.id}
-      end
+      peer = Peers.find(target) ->
+        {peer.ip, peer.id}
+
+      looks_like_device_id?(target) ->
+        IO.puts("Device #{target} not found in recent discoveries.")
+        IO.puts("Run 'crispkey discover' first to find devices on your network.")
+        System.halt(1)
+
+      true ->
+        {target, target}
     end
   end
 
-  @spec is_ip_address?(String.t()) :: boolean()
-  defp is_ip_address?(str) do
-    case String.split(str, ".") do
-      [a, b, c, d] ->
-        Enum.all?([a, b, c, d], fn part ->
-          case Integer.parse(part) do
-            {n, ""} -> n >= 0 and n <= 255
-            _ -> false
-          end
-        end)
+  @spec ip_address?(String.t()) :: boolean()
+  defp ip_address?(str) do
+    parts = String.split(str, ".")
 
-      _ ->
-        false
+    if length(parts) == 4 do
+      parts
+      |> Enum.map(&parse_octet/1)
+      |> Enum.all?(&(&1 !== nil))
+    else
+      false
+    end
+  end
+
+  defp parse_octet(part) do
+    case Integer.parse(part) do
+      {n, ""} when n >= 0 and n <= 255 -> n
+      _ -> nil
     end
   end
 
@@ -465,7 +468,7 @@ defmodule Crispkey.CLI do
   defp sync(args) do
     ensure_unlocked!()
 
-    state = Crispkey.Store.LocalState.get_state()
+    state = LocalState.get_state()
 
     peers =
       case args do
@@ -487,33 +490,41 @@ defmodule Crispkey.CLI do
       IO.puts("No devices to sync with. Use 'crispkey pair <id|host>' first.")
     else
       remote_password = get_passphrase("Enter remote device's sync password: ")
-
-      Enum.each(peers, fn peer ->
-        IO.puts("Syncing with #{peer.id}...")
-
-        case Crispkey.Sync.Connection.connect(peer.host) do
-          {:ok, conn} ->
-            result = Crispkey.Sync.Connection.sync(conn.socket, remote_password)
-            Crispkey.Sync.Connection.close(conn)
-
-            case result do
-              :ok -> IO.puts("Sync complete with #{peer.id}")
-              {:error, :auth_failed} -> IO.puts("Sync failed: Wrong sync password")
-              {:error, reason} -> IO.puts("Sync failed: #{inspect(reason)}")
-            end
-
-          {:error, reason} ->
-            IO.puts("Connection failed: #{inspect(reason)}")
-        end
-      end)
+      Enum.each(peers, &sync_with_peer(&1, remote_password))
     end
 
     System.halt(0)
   end
 
+  defp sync_with_peer(peer, remote_password) do
+    IO.puts("Syncing with #{peer.id}...")
+
+    case Connection.connect(peer.host) do
+      {:ok, conn} ->
+        result = Connection.sync(conn.socket, remote_password)
+        Connection.close(conn)
+        report_sync_result(peer.id, result)
+
+      {:error, reason} ->
+        IO.puts("Connection failed: #{inspect(reason)}")
+    end
+  end
+
+  defp report_sync_result(peer_id, :ok) do
+    IO.puts("Sync complete with #{peer_id}")
+  end
+
+  defp report_sync_result(_peer_id, {:error, :auth_failed}) do
+    IO.puts("Sync failed: Wrong sync password")
+  end
+
+  defp report_sync_result(_peer_id, {:error, reason}) do
+    IO.puts("Sync failed: #{inspect(reason)}")
+  end
+
   @spec export_key(String.t()) :: no_return()
   defp export_key(fingerprint) do
-    case Crispkey.GPG.Interface.export_public_key(fingerprint) do
+    case GPGInterface.export_public_key(fingerprint) do
       {:ok, data} ->
         IO.puts(data)
 
@@ -528,9 +539,9 @@ defmodule Crispkey.CLI do
   defp wrap_key(fingerprint) do
     passphrase = get_passphrase("Enter wrapping passphrase: ")
 
-    with {:ok, pub_data} <- Crispkey.GPG.Interface.export_public_key(fingerprint),
-         {:ok, sec_data} <- Crispkey.GPG.Interface.export_secret_key(fingerprint),
-         {:ok, trust_data} <- Crispkey.GPG.Interface.export_trustdb() do
+    with {:ok, pub_data} <- GPGInterface.export_public_key(fingerprint),
+         {:ok, sec_data} <- GPGInterface.export_secret_key(fingerprint),
+         {:ok, trust_data} <- GPGInterface.export_trustdb() do
       bundle =
         Jason.encode!(%{
           public: pub_data,
@@ -539,7 +550,7 @@ defmodule Crispkey.CLI do
           fingerprint: fingerprint
         })
 
-      wrapped = Crispkey.Crypto.KeyWrapper.wrap(bundle, passphrase)
+      wrapped = Crypto.KeyWrapper.wrap(bundle, passphrase)
 
       filename = "crispkey_#{fingerprint}.wrapped"
       File.write!(filename, wrapped)
@@ -557,33 +568,41 @@ defmodule Crispkey.CLI do
     passphrase = get_passphrase("Enter wrapping passphrase: ")
     wrapped = File.read!(file)
 
-    case Crispkey.Crypto.KeyWrapper.unwrap(wrapped, passphrase) do
+    case Crypto.KeyWrapper.unwrap(wrapped, passphrase) do
       {:ok, bundle_json} ->
-        case Jason.decode(bundle_json) do
-          {:ok, bundle} ->
-            public = Map.get(bundle, "public")
-            secret = Map.get(bundle, "secret")
-            trust = Map.get(bundle, "trust")
-            fingerprint = Map.get(bundle, "fingerprint")
-
-            with {:ok, _} <- Crispkey.GPG.Interface.import_key(public),
-                 {:ok, _} <- Crispkey.GPG.Interface.import_key(secret),
-                 {:ok, _} <- Crispkey.GPG.Interface.import_trustdb(trust) do
-              IO.puts("Imported key #{fingerprint}")
-            else
-              {:error, {_, msg}} ->
-                IO.puts("Import failed: #{msg}")
-            end
-
-          {:error, _} ->
-            IO.puts("Failed to parse key bundle")
-        end
+        unwrap_key_from_bundle(bundle_json)
 
       {:error, :decryption_failed} ->
         IO.puts("Decryption failed - wrong passphrase?")
     end
 
     System.halt(0)
+  end
+
+  defp unwrap_key_from_bundle(bundle_json) do
+    case Jason.decode(bundle_json) do
+      {:ok, bundle} ->
+        public = Map.get(bundle, "public")
+        secret = Map.get(bundle, "secret")
+        trust = Map.get(bundle, "trust")
+        fingerprint = Map.get(bundle, "fingerprint")
+
+        import_keys_from_bundle(public, secret, trust, fingerprint)
+
+      {:error, _} ->
+        IO.puts("Failed to parse key bundle")
+    end
+  end
+
+  defp import_keys_from_bundle(public, secret, trust, fingerprint) do
+    with {:ok, _} <- GPGInterface.import_key(public),
+         {:ok, _} <- GPGInterface.import_key(secret),
+         {:ok, _} <- GPGInterface.import_trustdb(trust) do
+      IO.puts("Imported key #{fingerprint}")
+    else
+      {:error, {_, msg}} ->
+        IO.puts("Import failed: #{msg}")
+    end
   end
 
   @spec get_passphrase(String.t()) :: String.t()

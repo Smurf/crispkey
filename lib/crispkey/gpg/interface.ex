@@ -3,7 +3,7 @@ defmodule Crispkey.GPG.Interface do
   Interface to GPG CLI for key operations.
   """
 
-  alias Crispkey.GPG.{Key, Subkey, UID, Types}
+  alias Crispkey.GPG.{Key, Subkey, Types, UID}
 
   @type gpg_error :: {:error, {pos_integer(), String.t()}}
 

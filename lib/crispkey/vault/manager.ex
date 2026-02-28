@@ -8,8 +8,8 @@ defmodule Crispkey.Vault.Manager do
 
   use GenServer
 
-  alias Crispkey.Vault.{Crypto, Types, ManifestModule}
-  alias Types.{Vault, VaultEntry, Manifest}
+  alias Crispkey.Vault.{Crypto, ManifestModule, Types}
+  alias Types.{Manifest, Vault, VaultEntry}
 
   @type state :: %{
           master_key: binary() | nil,
@@ -200,25 +200,7 @@ defmodule Crispkey.Vault.Manager do
 
   def handle_call({:update_vault, fingerprint, updates}, _from, state) do
     if state.unlocked do
-      case load_vault(fingerprint, state.master_key) do
-        {:ok, vault} ->
-          updated_vault = merge_vault_updates(vault, updates)
-
-          case save_vault(updated_vault, state.master_key) do
-            :ok ->
-              entry = build_entry(updated_vault)
-              vaults = Map.put(state.manifest.vaults, fingerprint, entry)
-              manifest = %{state.manifest | vaults: vaults, modified_at: DateTime.utc_now()}
-              save_manifest_encrypted!(manifest, state.master_key, state.master_salt)
-              {:reply, :ok, %{state | manifest: manifest}}
-
-            {:error, reason} ->
-              {:reply, {:error, reason}, state}
-          end
-
-        {:error, reason} ->
-          {:reply, {:error, reason}, state}
-      end
+      do_update_vault(fingerprint, updates, state)
     else
       {:reply, {:error, :locked}, state}
     end
@@ -288,6 +270,31 @@ defmodule Crispkey.Vault.Manager do
       {:reply, {:ok, state.manifest}, state}
     else
       {:reply, {:error, :locked}, state}
+    end
+  end
+
+  defp do_update_vault(fingerprint, updates, state) do
+    case load_vault(fingerprint, state.master_key) do
+      {:ok, vault} ->
+        updated_vault = merge_vault_updates(vault, updates)
+        save_and_reply(updated_vault, state)
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp save_and_reply(updated_vault, state) do
+    case save_vault(updated_vault, state.master_key) do
+      :ok ->
+        entry = build_entry(updated_vault)
+        vaults = Map.put(state.manifest.vaults, updated_vault.fingerprint, entry)
+        manifest = %{state.manifest | vaults: vaults, modified_at: DateTime.utc_now()}
+        save_manifest_encrypted!(manifest, state.master_key, state.master_salt)
+        {:reply, :ok, %{state | manifest: manifest}}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-sync.sh - Test key synchronization between containers
+# test-sync.sh - Test encrypted vault synchronization between containers
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -7,7 +7,8 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 ALICE="crispkey-alice"
 BOB="crispkey-bob"
-SYNC_PASSWORD="test-sync-password-123"
+SYNC_PASSWORD="testsync123"
+MASTER_PASSWORD="testmaster123"
 
 log() {
     echo "[$(date '+%H:%M:%S')] $1"
@@ -20,7 +21,7 @@ error() {
 exec_in() {
     local container=$1
     shift
-    podman exec -u testuser -e HOME=/home/testuser -e GNUPGHOME=/home/testuser/.gnupg "$container" "$@"
+    podman exec -u testuser -e HOME=/home/testuser -e GNUPGHOME=/home/testuser/.gnupg -e CRISPKEY_DATA_DIR=/home/testuser/.config/crispkey "$container" "$@"
 }
 
 get_device_id() {
@@ -28,30 +29,42 @@ get_device_id() {
     exec_in "$container" cat /home/testuser/.config/crispkey/device_id 2>/dev/null || echo ""
 }
 
-get_bob_ip() {
-    podman inspect "$BOB" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null || echo ""
-}
-
 get_alice_ip() {
     podman inspect "$ALICE" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null || echo ""
 }
 
-count_keys() {
+count_vaults() {
     local container=$1
-    local output
-    output=$(exec_in "$container" crispkey keys 2>/dev/null)
-    # Count lines with key IDs (16 hex chars followed by algorithm)
-    echo "$output" | grep -E '^\s+[A-F0-9]{16}' | wc -l | tr -d ' '
+    local count
+    count=$(exec_in "$container" ls /home/testuser/.config/crispkey/vaults/*.vault 2>/dev/null | wc -l | tr -d ' ')
+    echo "$count"
 }
 
-get_alice_fingerprints() {
-    exec_in "$ALICE" crispkey keys 2>/dev/null | grep -oE '[A-F0-9]{16}' | sort -u || true
+count_gpg_keys() {
+    local container=$1
+    local output
+    output=$(exec_in "$container" gpg --list-keys --with-colons 2>/dev/null)
+    echo "$output" | grep -c "^pub" || echo "0"
+}
+
+get_alice_vault_fps() {
+    exec_in "$ALICE" ls /home/testuser/.config/crispkey/vaults/*.vault 2>/dev/null | xargs -I{} basename {} .vault | sort || true
+}
+
+unlock_vaults() {
+    local container=$1
+    exec_in "$container" expect -c "
+        spawn crispkey unlock
+        expect \"master password\"
+        send \"$MASTER_PASSWORD\\r\"
+        expect eof
+    " 2>/dev/null || true
 }
 
 test_sync() {
-    log "Testing key sync..."
+    log "Testing vault sync..."
     
-    # Get Alice's device ID (Bob will sync FROM Alice)
+    # Get Alice's device ID
     local alice_id
     alice_id=$(get_device_id "$ALICE")
     
@@ -60,99 +73,128 @@ test_sync() {
         return 1
     fi
     
-    # Count keys before sync
-    local alice_keys_before bob_keys_before
-    alice_keys_before=$(count_keys "$ALICE")
-    bob_keys_before=$(count_keys "$BOB")
+    log "Alice device ID: $alice_id"
     
-    log "Keys before sync - Alice: $alice_keys_before, Bob: $bob_keys_before"
+    # Count vaults before sync
+    local alice_vaults_before bob_vaults_before
+    alice_vaults_before=$(count_vaults "$ALICE")
+    bob_vaults_before=$(count_vaults "$BOB")
     
-    if [ "$alice_keys_before" -eq 0 ]; then
-        error "Alice has no keys to sync"
+    log "Vaults before sync - Alice: $alice_vaults_before, Bob: $bob_vaults_before"
+    
+    if [ "$alice_vaults_before" -eq 0 ]; then
+        error "Alice has no vaults to sync"
         return 1
     fi
     
-    # Run sync FROM Bob TO Alice (Bob pulls keys from Alice)
-    # The sync command pulls keys FROM the peer TO local
-    log "Running sync from Bob (pulling from Alice)..."
-    
-    # First Bob needs to pair with Alice
+    # Get Alice's IP
     local alice_ip
     alice_ip=$(get_alice_ip)
     
-    log "Pairing Bob with Alice first..."
+    log "Alice IP: $alice_ip"
+    
+    # Pair Bob with Alice first
+    log "Pairing Bob with Alice..."
     exec_in "$BOB" crispkey pair "$alice_ip" 2>&1 || true
     
-    # The sync command needs the password
+    # Unlock Bob's vaults
+    log "Unlocking Bob's vaults..."
+    unlock_vaults "$BOB"
+    
+    # Run sync (Bob pulls from Alice)
+    log "Running sync from Bob (pulling from Alice)..."
     local sync_output
     sync_output=$(exec_in "$BOB" expect -c "
         spawn crispkey sync $alice_id
-        expect \"Sync password:\"
+        expect \"sync password\"
         send \"$SYNC_PASSWORD\\r\"
         expect eof
     " 2>&1 || true)
     
     log "Sync output: $sync_output"
     
-    # Count keys after sync
+    # Count vaults after sync
     sleep 1
-    local bob_keys_after
-    bob_keys_after=$(count_keys "$BOB")
+    local bob_vaults_after
+    bob_vaults_after=$(count_vaults "$BOB")
     
-    log "Keys after sync - Bob: $bob_keys_after"
+    log "Vaults after sync - Bob: $bob_vaults_after"
     
-    if [ "$bob_keys_after" -ge "$alice_keys_before" ]; then
-        log "Sync: PASS - Keys transferred to Bob"
+    if [ "$bob_vaults_after" -ge "$alice_vaults_before" ]; then
+        log "Sync: PASS - Vaults transferred to Bob"
         return 0
     else
-        error "Sync: FAIL - Keys not transferred (expected >= $alice_keys_before, got $bob_keys_after)"
+        error "Sync: FAIL - Vaults not transferred (expected >= $alice_vaults_before, got $bob_vaults_after)"
         return 1
     fi
 }
 
-test_key_integrity() {
-    log "Testing key integrity..."
+test_vault_integrity() {
+    log "Testing vault integrity..."
     
     # Get fingerprints from both containers
     local alice_fps bob_fps
-    alice_fps=$(get_alice_fingerprints | sort)
-    bob_fps=$(exec_in "$BOB" crispkey keys 2>/dev/null | grep -oE '[A-F0-9]{16}' | sort -u)
+    alice_fps=$(get_alice_vault_fps)
+    bob_fps=$(exec_in "$BOB" ls /home/testuser/.config/crispkey/vaults/*.vault 2>/dev/null | xargs -I{} basename {} .vault | sort || true)
     
     if [ -z "$alice_fps" ]; then
-        error "No fingerprints found in Alice"
+        error "No vaults found in Alice"
         return 1
     fi
     
-    log "Alice fingerprints:"
+    log "Alice vault fingerprints:"
     echo "$alice_fps" | while read fp; do
-        log "  $fp"
+        [ -n "$fp" ] && log "  $fp"
     done
     
-    log "Bob fingerprints:"
+    log "Bob vault fingerprints:"
     echo "$bob_fps" | while read fp; do
-        log "  $fp"
+        [ -n "$fp" ] && log "  $fp"
     done
     
-    # Check if all Alice's keys are in Bob
+    # Check if all Alice's vaults are in Bob
     local all_found=true
     while read fp; do
-        if ! echo "$bob_fps" | grep -q "$fp"; then
-            error "Key $fp not found in Bob"
+        if [ -n "$fp" ] && ! echo "$bob_fps" | grep -q "$fp"; then
+            error "Vault $fp not found in Bob"
             all_found=false
         fi
     done <<< "$alice_fps"
     
     if [ "$all_found" = true ]; then
-        log "Integrity: PASS - All keys match"
+        log "Integrity: PASS - All vaults match"
         return 0
     else
-        error "Integrity: FAIL - Key mismatch"
+        error "Integrity: FAIL - Vault mismatch"
+        return 1
+    fi
+}
+
+test_vault_decryption() {
+    log "Testing vault decryption..."
+    
+    # Unlock Bob's vaults and list them
+    unlock_vaults "$BOB"
+    
+    local vault_list
+    vault_list=$(exec_in "$BOB" crispkey vault list 2>&1 || true)
+    
+    log "Bob's vaults:"
+    echo "$vault_list" | while read line; do
+        log "  $line"
+    done
+    
+    if echo "$vault_list" | grep -q "fingerprint"; then
+        log "Decryption: PASS - Vaults can be listed"
+        return 0
+    else
+        error "Decryption: FAIL - Cannot list vaults"
         return 1
     fi
 }
 
 main() {
-    log "Starting sync tests..."
+    log "Starting vault sync tests..."
     
     local failures=0
     
@@ -160,7 +202,11 @@ main() {
         ((failures++))
     fi
     
-    if ! test_key_integrity; then
+    if ! test_vault_integrity; then
+        ((failures++))
+    fi
+    
+    if ! test_vault_decryption; then
         ((failures++))
     fi
     

@@ -1,27 +1,20 @@
 defmodule Crispkey.Sync.Peer do
   @moduledoc """
-  Per-connection GenServer handling the server side of sync.
+  Per-connection GenServer handling the server side of sync with encrypted sessions.
   """
 
   use GenServer
 
-  alias Crispkey.Sync.{Message, Protocol}
-
-  alias Crispkey.Sync.Message.{
-    Hello,
-    Auth,
-    Inventory,
-    Request,
-    KeyData,
-    TrustData,
-    Ack,
-    Goodbye
-  }
+  alias Crispkey.Sync.{Protocol, Session}
+  alias Crispkey.Vault.{Manager, ManifestModule}
+  alias Crispkey.Vault.Types.Session, as: SessionState
 
   @type state :: %{
           socket: :gen_tcp.socket(),
           is_client: boolean(),
           peer_id: String.t() | nil,
+          session: SessionState.t() | nil,
+          session_id: binary() | nil,
           authenticated: boolean(),
           buffer: binary()
         }
@@ -39,11 +32,6 @@ defmodule Crispkey.Sync.Peer do
     end
   end
 
-  @spec send_msg(pid(), Message.t()) :: :ok
-  def send_msg(pid, msg) do
-    GenServer.cast(pid, {:send, msg})
-  end
-
   @impl true
   @spec init({:gen_tcp.socket(), keyword()}) :: {:ok, state(), {:continue, :handshake}}
   def init({socket, opts}) do
@@ -51,6 +39,8 @@ defmodule Crispkey.Sync.Peer do
       socket: socket,
       is_client: Keyword.get(opts, :is_client, false),
       peer_id: nil,
+      session: nil,
+      session_id: nil,
       authenticated: false,
       buffer: <<>>
     }
@@ -75,15 +65,16 @@ defmodule Crispkey.Sync.Peer do
 
   @impl true
   def handle_call(:sync, _from, state) do
-    case exchange_inventory(state) do
-      {:ok, remote_keys, state} ->
-        local_keys = get_local_inventory()
+    case exchange_manifest(state) do
+      {:ok, remote_manifest, state} ->
+        {:ok, local_manifest} = Manager.get_manifest()
 
-        needed = find_needed_keys(local_keys, remote_keys)
+        diff = ManifestModule.diff(local_manifest, remote_manifest)
+        needed = Enum.map(diff.remote_only, & &1.fingerprint)
 
         result =
           Enum.reduce(needed, :ok, fn fingerprint, _acc ->
-            request_key(state, fingerprint)
+            request_vault(state, fingerprint)
           end)
 
         {:reply, result, state}
@@ -94,18 +85,11 @@ defmodule Crispkey.Sync.Peer do
   end
 
   @impl true
-  def handle_cast({:send, msg}, state) do
-    data = Protocol.encode(msg)
-    :gen_tcp.send(state.socket, data)
-    {:noreply, state}
-  end
-
-  @impl true
   def handle_info({:tcp, _socket, data}, state) do
     buffer = state.buffer <> data
 
-    case extract_messages(buffer) do
-      {:ok, messages, rest} ->
+    case extract_messages(buffer, state) do
+      {:ok, messages, rest, state} ->
         state = Enum.reduce(messages, state, &handle_message/2)
         {:noreply, %{state | buffer: rest}}
 
@@ -118,27 +102,41 @@ defmodule Crispkey.Sync.Peer do
     {:stop, :normal, state}
   end
 
-  def handle_info({:inventory, _keys}, state) do
-    {:noreply, state}
-  end
-
   def handle_info(_msg, state) do
     {:noreply, state}
   end
 
-  @spec send_hello(state()) :: :ok
-  defp send_hello(state) do
-    msg = Protocol.hello(Crispkey.device_id())
+  @spec send_hello_v2(state()) :: :ok
+  defp send_hello_v2(state) do
+    session_id = generate_session_id()
+    msg = Protocol.hello_v2(Crispkey.device_id(), session_id)
     data = Protocol.encode(msg)
     :gen_tcp.send(state.socket, data)
+    :ok
+  end
+
+  @spec send_encrypted(state(), map()) :: state()
+  defp send_encrypted(%{session: nil} = _state, _msg) do
+    :ok
+  end
+
+  defp send_encrypted(%{socket: socket, session: session} = state, msg) do
+    {data, session} = Protocol.encode_encrypted(msg, session)
+    :gen_tcp.send(socket, data)
+    %{state | session: session}
   end
 
   @spec client_handshake(state()) :: {:ok, state()} | {:error, term()}
   defp client_handshake(state) do
-    send_hello(state)
+    send_hello_v2(state)
 
-    case recv_message(state) do
-      {:ok, %Hello{device_id: device_id}, state} ->
+    case recv_raw(state) do
+      {:ok, %{"type" => "hello", "device_id" => device_id, "session_id" => session_id_b64}, state} ->
+        session_id = Base.decode64!(session_id_b64)
+        :inet.setopts(state.socket, [{:active, true}])
+        {:ok, %{state | peer_id: device_id, session_id: session_id}}
+
+      {:ok, %{"type" => "hello", "device_id" => device_id}, state} ->
         :inet.setopts(state.socket, [{:active, true}])
         {:ok, %{state | peer_id: device_id}}
 
@@ -149,9 +147,23 @@ defmodule Crispkey.Sync.Peer do
 
   @spec server_handshake(state()) :: {:ok, state()} | {:error, term()}
   defp server_handshake(state) do
-    case recv_message(state) do
-      {:ok, %Hello{device_id: device_id}, state} ->
-        send_hello(state)
+    case recv_raw(state) do
+      {:ok, %{"type" => "hello", "device_id" => device_id, "session_id" => session_id_b64}, state} ->
+        session_id = Base.decode64!(session_id_b64)
+        my_session_id = generate_session_id()
+
+        msg = Protocol.hello_v2(Crispkey.device_id(), my_session_id)
+        data = Protocol.encode(msg)
+        :gen_tcp.send(state.socket, data)
+
+        :inet.setopts(state.socket, [{:active, true}])
+        {:ok, %{state | peer_id: device_id, session_id: session_id}}
+
+      {:ok, %{"type" => "hello", "device_id" => device_id}, state} ->
+        msg = Protocol.hello(Crispkey.device_id())
+        data = Protocol.encode(msg)
+        :gen_tcp.send(state.socket, data)
+
         :inet.setopts(state.socket, [{:active, true}])
         {:ok, %{state | peer_id: device_id}}
 
@@ -160,75 +172,70 @@ defmodule Crispkey.Sync.Peer do
     end
   end
 
-  @spec handle_message(Message.t(), state()) :: state()
-  defp handle_message(%Hello{device_id: device_id}, state) do
-    %{state | peer_id: device_id}
-  end
+  @spec handle_message(map(), state()) :: state()
+  defp handle_message(%{"type" => "auth_token", "token" => token}, state) do
+    IO.puts("[PEER] Received auth token")
 
-  defp handle_message(%Auth{password_hash: hash}, state) do
-    IO.puts("[PEER] Received auth request")
+    sync_password =
+      Crispkey.Store.LocalState.get_state().sync_password_hash
+      |> Base.decode64!()
 
-    if Crispkey.Store.LocalState.verify_sync_password_hash(hash) do
+    session = Session.create_with_id(sync_password, state.session_id)
+
+    if Session.verify_auth_token(session, token) do
       IO.puts("[PEER] Auth succeeded")
-      msg = Protocol.auth_ok()
-      :gen_tcp.send(state.socket, Protocol.encode(msg))
-      %{state | authenticated: true}
+      state = %{state | session: session, authenticated: true}
+      send_encrypted(state, %{type: "auth_ok"})
     else
       IO.puts("[PEER] Auth failed")
-      msg = Protocol.auth_fail()
-      :gen_tcp.send(state.socket, Protocol.encode(msg))
+      state = %{state | session: session}
+      send_encrypted(state, %{type: "auth_fail"})
+    end
+  end
+
+  defp handle_message(%{"type" => "manifest_request"}, state) do
+    IO.puts("[PEER] Received manifest request")
+
+    if state.authenticated do
+      {:ok, manifest} = Manager.get_manifest()
+      manifest_json = ManifestModule.to_json(manifest)
+      send_encrypted(state, %{type: "manifest", data: manifest_json})
+    else
+      IO.puts("[PEER] Not authenticated, ignoring manifest request")
       state
     end
   end
 
-  defp handle_message(%Inventory{keys: remote_keys}, state) do
-    IO.puts("[PEER] Received inventory with #{length(remote_keys)} keys")
-    local_keys = get_local_inventory()
-    IO.puts("[PEER] Sending back #{length(local_keys)} keys")
-    msg = Protocol.inventory(local_keys)
-    data = Protocol.encode(msg)
-    :gen_tcp.send(state.socket, data)
-    state
-  end
-
-  defp handle_message(%Request{fingerprints: fps, types: types}, state) do
+  defp handle_message(%{"type" => "vault_request", "fingerprints" => fps}, state) do
     IO.puts(
-      "[PEER] Received request for #{length(fps)} keys, authenticated=#{state.authenticated}"
+      "[PEER] Received vault request for #{length(fps)} vaults, authenticated=#{state.authenticated}"
     )
 
     if state.authenticated do
       Enum.each(fps, fn fp ->
-        IO.puts("[PEER] Sending key #{fp}")
-        send_key(state.socket, fp, types)
+        IO.puts("[PEER] Sending vault #{fp}")
+        send_vault(state, fp)
       end)
 
-      msg = Protocol.ack("request", :done)
-      :gen_tcp.send(state.socket, Protocol.encode(msg))
+      send_encrypted(state, %{type: "ack"})
     else
-      IO.puts("[PEER] Not authenticated, ignoring request")
+      IO.puts("[PEER] Not authenticated, ignoring vault request")
+      state
     end
+  end
 
+  defp handle_message(%{"type" => "vault_data", "fingerprint" => fp, "data" => data_b64}, state) do
+    vault_data = Base.decode64!(data_b64)
+    :ok = Manager.put_raw_vault(fp, vault_data)
+    IO.puts("[PEER] Stored vault #{fp}")
     state
   end
 
-  defp handle_message(%KeyData{fingerprint: fp, key_type: type, data: data}, state) do
-    store_key(fp, type, data)
-    Crispkey.Store.LocalState.record_sync(state.peer_id, fp)
-    state
-  end
-
-  defp handle_message(%TrustData{data: data}, state) do
-    store_trust(data)
-    state
-  end
-
-  defp handle_message(%Ack{}, state), do: state
-  defp handle_message(%Goodbye{}, state), do: state
+  defp handle_message(%{"type" => "ack"}, state), do: state
   defp handle_message(_, state), do: state
 
-  @spec recv_message(state()) ::
-          {:ok, Message.t(), state()} | {:error, term()}
-  defp recv_message(state) do
+  @spec recv_raw(state()) :: {:ok, map(), state()} | {:error, term()}
+  defp recv_raw(state) do
     case :gen_tcp.recv(state.socket, 4, 5000) do
       {:ok, <<len::32>>} ->
         case :gen_tcp.recv(state.socket, len, 5000) do
@@ -247,22 +254,22 @@ defmodule Crispkey.Sync.Peer do
     end
   end
 
-  @spec extract_messages(binary()) ::
-          {:ok, [Message.t()], binary()} | {:continue, binary()}
-  defp extract_messages(buffer) when byte_size(buffer) < 4 do
+  @spec extract_messages(binary(), state()) ::
+          {:ok, [map()], binary(), state()} | {:continue, binary()}
+  defp extract_messages(buffer, _state) when byte_size(buffer) < 4 do
     {:continue, buffer}
   end
 
-  defp extract_messages(<<len::32, rest::binary>> = buffer) when byte_size(rest) < len do
+  defp extract_messages(<<len::32, rest::binary>> = buffer, _state) when byte_size(rest) < len do
     {:continue, buffer}
   end
 
-  defp extract_messages(<<len::32, data::binary-size(len), rest::binary>>) do
-    case Protocol.decode(<<len::32, data::binary>>) do
-      {:ok, msg} ->
-        case extract_messages(rest) do
-          {:ok, msgs, r} -> {:ok, [msg | msgs], r}
-          {:continue, r} -> {:ok, [msg], r}
+  defp extract_messages(<<len::32, data::binary-size(len), rest::binary>>, state) do
+    case decode_message(<<len::32, data::binary>>, state) do
+      {:ok, msg, state} ->
+        case extract_messages(rest, state) do
+          {:ok, msgs, r, state} -> {:ok, [msg | msgs], r, state}
+          {:continue, r} -> {:ok, [msg], r, state}
         end
 
       {:error, _reason} ->
@@ -270,109 +277,113 @@ defmodule Crispkey.Sync.Peer do
     end
   end
 
-  @spec get_local_inventory() :: [map()]
-  defp get_local_inventory do
-    {:ok, pub_keys} = Crispkey.GPG.Interface.list_public_keys()
-    {:ok, sec_keys} = Crispkey.GPG.Interface.list_secret_keys()
-
-    inventory =
-      (pub_keys ++ sec_keys)
-      |> Enum.map(fn key ->
-        %{fingerprint: key.fingerprint, type: key.type, modified: key.created_at}
-      end)
-
-    IO.puts(
-      "[PEER] Local inventory: #{length(pub_keys)} public + #{length(sec_keys)} secret = #{length(inventory)} total"
-    )
-
-    inventory
+  @spec decode_message(binary(), state()) :: {:ok, map(), state()} | {:error, term()}
+  defp decode_message(binary, %{session: nil} = state) do
+    Protocol.decode(binary)
+    |> case do
+      {:ok, msg} -> {:ok, msg, state}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
-  @spec exchange_inventory(state()) ::
-          {:ok, [map()], state()} | {:error, term()}
-  defp exchange_inventory(state) do
-    local_keys = get_local_inventory()
-    msg = Protocol.inventory(local_keys)
-    data = Protocol.encode(msg)
-    :gen_tcp.send(state.socket, data)
+  defp decode_message(binary, %{session: session} = state) do
+    case Protocol.decode_encrypted(binary, session) do
+      {:ok, msg, session} -> {:ok, msg, %{state | session: session}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
-    case recv_message(state) do
-      {:ok, %Inventory{keys: remote_keys}, state} ->
-        {:ok, remote_keys, state}
+  @spec exchange_manifest(state()) ::
+          {:ok, map(), state()} | {:error, term()}
+  defp exchange_manifest(%{session: nil} = _state) do
+    {:error, :no_session}
+  end
+
+  defp exchange_manifest(%{socket: socket, session: session} = state) do
+    {data, session} = Protocol.encode_encrypted(%{type: "manifest_request"}, session)
+    :gen_tcp.send(socket, data)
+    state = %{state | session: session}
+
+    case :gen_tcp.recv(socket, 4, 10000) do
+      {:ok, <<len::32>>} ->
+        case :gen_tcp.recv(socket, len, 10000) do
+          {:ok, data} ->
+            case Protocol.decode_encrypted(<<len::32, data::binary>>, state.session) do
+              {:ok, %{"type" => "manifest", "data" => manifest_data}, session} ->
+                {:ok, ManifestModule.from_json(manifest_data), %{state | session: session}}
+
+              {:error, reason} ->
+                {:error, reason}
+            end
+
+          {:error, reason} ->
+            {:error, reason}
+        end
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  @spec find_needed_keys([map()], [map()]) :: [String.t()]
-  defp find_needed_keys(local, remote) do
-    local_fps = MapSet.new(local, & &1.fingerprint)
-    remote_fps = MapSet.new(remote, & &1.fingerprint)
-    MapSet.difference(remote_fps, local_fps) |> MapSet.to_list()
+  @spec request_vault(state(), String.t()) :: :ok | {:error, :timeout}
+  defp request_vault(%{session: nil}, _fingerprint) do
+    {:error, :no_session}
   end
 
-  @spec request_key(state(), String.t()) :: :ok | {:error, :timeout}
-  defp request_key(state, fingerprint) do
-    msg = Protocol.request([fingerprint], [:public, :secret])
-    data = Protocol.encode(msg)
-    :gen_tcp.send(state.socket, data)
+  defp request_vault(%{socket: socket, session: session}, fingerprint) do
+    {data, session} =
+      Protocol.encode_encrypted(%{type: "vault_request", fingerprints: [fingerprint]}, session)
+
+    :gen_tcp.send(socket, data)
 
     receive do
-      {:tcp, _, _} -> :ok
+      {:tcp, _, _} ->
+        case :gen_tcp.recv(socket, 4, 30000) do
+          {:ok, <<len::32>>} ->
+            case :gen_tcp.recv(socket, len, 30000) do
+              {:ok, data} ->
+                case Protocol.decode_encrypted(<<len::32, data::binary>>, session) do
+                  {:ok, %{"type" => "vault_data", "fingerprint" => fp, "data" => data_b64}, _} ->
+                    vault_data = Base.decode64!(data_b64)
+                    :ok = Manager.put_raw_vault(fp, vault_data)
+                    IO.puts("[PEER] Stored vault #{fp}")
+                    :ok
+
+                  {:ok, %{"type" => "ack"}, _} ->
+                    :ok
+
+                  {:error, reason} ->
+                    IO.puts("[PEER] Error decoding vault: #{inspect(reason)}")
+                    :ok
+                end
+
+              {:error, reason} ->
+                {:error, reason}
+            end
+
+          {:error, reason} ->
+            {:error, reason}
+        end
     after
-      30_000 -> {:error, :timeout}
+      30000 -> {:error, :timeout}
     end
   end
 
-  @spec send_key(:gen_tcp.socket(), String.t(), [atom()]) :: :ok
-  defp send_key(socket, fingerprint, types) do
-    Enum.each(types, fn type ->
-      type_atom = normalize_key_type(type)
+  @spec send_vault(state(), String.t()) :: state()
+  defp send_vault(%{socket: _socket, session: _session} = state, fingerprint) do
+    case Manager.get_raw_vault(fingerprint) do
+      {:ok, vault_data} ->
+        msg = %{type: "vault_data", fingerprint: fingerprint, data: Base.encode64(vault_data)}
+        send_encrypted(state, msg)
 
-      case export_key(fingerprint, type_atom) do
-        {:ok, data} ->
-          IO.puts("[PEER] Exported #{type_atom} key, sending #{byte_size(data)} bytes")
-          msg = Protocol.key_data(fingerprint, type_atom, data, %{})
-          :gen_tcp.send(socket, Protocol.encode(msg))
-
-        {:error, reason} ->
-          IO.puts("[PEER] Failed to export #{type_atom}: #{inspect(reason)}")
-          :ok
-      end
-    end)
-  end
-
-  @spec normalize_key_type(atom() | String.t()) :: atom()
-  defp normalize_key_type(type) when is_atom(type), do: type
-  defp normalize_key_type(type) when is_binary(type), do: String.to_atom(type)
-
-  @spec export_key(String.t(), :public | :secret) :: {:ok, String.t()} | {:error, term()}
-  defp export_key(fingerprint, :public) do
-    Crispkey.GPG.Interface.export_public_key(fingerprint)
-  end
-
-  defp export_key(fingerprint, :secret) do
-    Crispkey.GPG.Interface.export_secret_key(fingerprint)
-  end
-
-  defp export_key(_fingerprint, _), do: {:error, :unknown_type}
-
-  @spec store_key(String.t(), atom(), String.t()) :: :ok
-  defp store_key(_fingerprint, type, data) do
-    type_atom = normalize_key_type(type)
-
-    case Crispkey.GPG.Interface.import_key(data) do
-      {:ok, _} -> IO.puts("[PEER] Imported #{type_atom} key")
-      {:error, reason} -> IO.puts("[PEER] Failed to import: #{inspect(reason)}")
+      {:error, :not_found} ->
+        IO.puts("[PEER] Vault not found: #{fingerprint}")
+        state
     end
-
-    :ok
   end
 
-  @spec store_trust(String.t()) :: :ok
-  defp store_trust(data) do
-    {:ok, _} = Crispkey.GPG.Interface.import_trustdb(data)
-    :ok
+  @spec generate_session_id() :: binary()
+  defp generate_session_id do
+    :crypto.strong_rand_bytes(16)
   end
 end

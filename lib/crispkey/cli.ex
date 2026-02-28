@@ -3,14 +3,19 @@ defmodule Crispkey.CLI do
   Command-line interface for crispkey.
   """
 
+  alias Crispkey.Vault.Manager
+
   @spec main([String.t()]) :: no_return()
   def main(args) do
+    configure_runtime()
     Application.ensure_all_started(:crispkey)
 
     case args do
       [] -> help()
       ["help" | _] -> help()
       ["init" | _] -> init()
+      ["unlock" | _] -> unlock()
+      ["lock" | _] -> lock()
       ["status" | _] -> status()
       ["keys" | _] -> list_keys()
       ["devices"] -> devices()
@@ -18,6 +23,7 @@ defmodule Crispkey.CLI do
       ["discover" | rest] -> discover(rest)
       ["pair", target] -> pair(target)
       ["sync" | rest] -> sync(rest)
+      ["vault" | rest] -> vault_cmd(rest)
       ["export", fp | _] -> export_key(fp)
       ["wrap", fp | _] -> wrap_key(fp)
       ["unwrap", file | _] -> unwrap_key(file)
@@ -28,19 +34,29 @@ defmodule Crispkey.CLI do
   @spec help() :: no_return()
   defp help do
     IO.puts("""
-    crispkey - GPG key synchronization
+    crispkey - GPG key synchronization with encrypted vaults
 
-    Usage:
-      crispkey init              Initialize crispkey
+    Vault Commands:
+      crispkey init              Initialize vault system
+      crispkey unlock            Unlock vaults with master password
+      crispkey lock              Lock vaults (clear master key from memory)
+      crispkey vault list        List vaults
+      crispkey vault import <fp> Import GPG key to vault
+      crispkey vault export <fp> Export vault to GPG keyring
+      crispkey vault delete <fp> Delete a vault
+
+    Sync Commands:
       crispkey status            Show sync status
-      crispkey keys              List local GPG keys
+      crispkey keys              List GPG keys in keyring
       crispkey devices           List paired devices
       crispkey daemon            Start background sync daemon
       crispkey discover [sec]    Find devices on network
-      crispkey pair <id|host>    Pair with a device (by ID or IP)
-      crispkey sync [device]     Sync keys with device(s)
+      crispkey pair <id|host>    Pair with a device
+      crispkey sync [device]     Sync vaults with device(s)
+
+    Legacy Commands:
       crispkey export <fp>       Export key (armored)
-      crispkey wrap <fp>         Export wrapped (encrypted) key
+      crispkey wrap <fp>         Export wrapped key
       crispkey unwrap <file>     Import wrapped key
     """)
 
@@ -49,19 +65,20 @@ defmodule Crispkey.CLI do
 
   @spec init() :: no_return()
   defp init do
-    IO.puts("Initializing crispkey...")
+    IO.puts("Initializing crispkey vault system...")
 
     File.mkdir_p!(Crispkey.data_dir())
+    File.mkdir_p!(Manager.vaults_dir())
 
-    passphrase = get_passphrase("Enter master passphrase: ")
-    confirm = get_passphrase("Confirm passphrase: ")
+    passphrase = get_passphrase("Enter master password (unlocks vaults): ")
+    confirm = get_passphrase("Confirm master password: ")
 
     if passphrase != confirm do
-      IO.puts("Passphrases do not match")
+      IO.puts("Passwords do not match")
       System.halt(1)
     end
 
-    sync_password = get_passphrase("Enter sync password (for remote devices to sync with you): ")
+    sync_password = get_passphrase("Enter sync password (for remote devices): ")
     sync_confirm = get_passphrase("Confirm sync password: ")
 
     if sync_password != sync_confirm do
@@ -69,41 +86,221 @@ defmodule Crispkey.CLI do
       System.halt(1)
     end
 
-    test_data = "crispkey_init_test"
-    wrapped = Crispkey.Crypto.KeyWrapper.wrap(test_data, passphrase)
+    :ok = Manager.initialize(passphrase)
 
-    case Crispkey.Crypto.KeyWrapper.unwrap(wrapped, passphrase) do
-      {:ok, ^test_data} ->
-        Crispkey.Store.LocalState.update_state(fn s -> %{s | initialized: true} end)
-        Crispkey.Store.LocalState.set_sync_password(sync_password)
-        IO.puts("Initialized successfully. Device ID: #{Crispkey.device_id()}")
+    Crispkey.Store.LocalState.update_state(fn s -> %{s | initialized: true} end)
+    Crispkey.Store.LocalState.set_sync_password(sync_password)
 
-      {:error, _} ->
-        IO.puts("Passphrase verification failed")
-        System.halt(1)
+    IO.puts("Initialized successfully.")
+    IO.puts("Device ID: #{Crispkey.device_id()}")
+    IO.puts("")
+    IO.puts("Vaults are encrypted and stored in: #{Manager.vaults_dir()}")
+    IO.puts("Use 'crispkey vault import <fingerprint>' to import GPG keys to vaults.")
+
+    System.halt(0)
+  end
+
+  @spec unlock() :: no_return()
+  defp unlock do
+    if Manager.unlocked?() do
+      IO.puts("Vaults already unlocked")
+      System.halt(0)
     end
 
+    password = get_passphrase("Enter master password: ")
+
+    case Manager.unlock(password) do
+      :ok ->
+        IO.puts("Vaults unlocked")
+        System.halt(0)
+
+      {:error, :invalid_password} ->
+        IO.puts("Invalid password")
+        System.halt(1)
+
+      {:error, :not_initialized} ->
+        IO.puts("Vault system not initialized. Run 'crispkey init' first.")
+        System.halt(1)
+    end
+  end
+
+  @spec lock() :: no_return()
+  defp lock do
+    Manager.lock()
+    IO.puts("Vaults locked")
     System.halt(0)
   end
 
   @spec status() :: no_return()
   defp status do
     state = Crispkey.Store.LocalState.get_state()
+    vault_unlocked = Manager.unlocked?()
 
     IO.puts("Device ID: #{state.device_id}")
     IO.puts("Initialized: #{state.initialized}")
+    IO.puts("Vaults unlocked: #{vault_unlocked}")
     IO.puts("Paired devices: #{map_size(state.peers)}")
     IO.puts("Last sync: #{state.last_sync || "never"}")
     IO.puts("Data dir: #{Crispkey.data_dir()}")
     IO.puts("GPG home: #{Crispkey.gpg_homedir()}")
+
+    if vault_unlocked do
+      case Manager.list_vaults() do
+        {:ok, vaults} ->
+          IO.puts("Vaults: #{length(vaults)}")
+
+        _ ->
+          :ok
+      end
+    end
+
     System.halt(0)
+  end
+
+  @spec vault_cmd([String.t()]) :: no_return()
+  defp vault_cmd(["list" | _]) do
+    ensure_unlocked!()
+
+    case Manager.list_vaults() do
+      {:ok, []} ->
+        IO.puts("No vaults. Use 'crispkey vault import <fingerprint>' to add one.")
+
+      {:ok, vaults} ->
+        IO.puts("Vaults:")
+
+        Enum.each(vaults, fn entry ->
+          secret_status = if entry.has_secret, do: "[secret]", else: "[public only]"
+          IO.puts("  #{entry.fingerprint} #{secret_status}")
+          IO.puts("    Size: #{entry.size} bytes, Modified: #{entry.modified}")
+        end)
+    end
+
+    System.halt(0)
+  end
+
+  defp vault_cmd(["import", fingerprint | _]) do
+    ensure_unlocked!()
+
+    with {:ok, pub_data} <- Crispkey.GPG.Interface.export_public_key(fingerprint),
+         {:ok, sec_data} <- Crispkey.GPG.Interface.export_secret_key(fingerprint),
+         {:ok, trust_data} <- Crispkey.GPG.Interface.export_trustdb() do
+      :ok = Manager.create_vault(fingerprint, pub_data, sec_data, trust_data)
+      IO.puts("Imported key #{fingerprint} to vault")
+    else
+      {:error, {:no_secret_key, _}} ->
+        case Crispkey.GPG.Interface.export_public_key(fingerprint) do
+          {:ok, pub_data} ->
+            {:ok, trust_data} = Crispkey.GPG.Interface.export_trustdb()
+            :ok = Manager.create_vault(fingerprint, pub_data, nil, trust_data)
+            IO.puts("Imported public key #{fingerprint} to vault (no secret key)")
+
+          {:error, reason} ->
+            IO.puts("Export failed: #{inspect(reason)}")
+            System.halt(1)
+        end
+
+      {:error, reason} ->
+        IO.puts("Export failed: #{inspect(reason)}")
+        System.halt(1)
+    end
+
+    System.halt(0)
+  end
+
+  defp vault_cmd(["export", fingerprint | _]) do
+    ensure_unlocked!()
+
+    case Manager.read_vault(fingerprint) do
+      {:ok, vault} ->
+        results = []
+
+        results =
+          if vault.public_key do
+            case Crispkey.GPG.Interface.import_key(vault.public_key) do
+              {:ok, _} -> [{:public, :ok} | results]
+              {:error, reason} -> [{:public, {:error, reason}} | results]
+            end
+          else
+            results
+          end
+
+        results =
+          if vault.secret_key do
+            case Crispkey.GPG.Interface.import_key(vault.secret_key) do
+              {:ok, _} -> [{:secret, :ok} | results]
+              {:error, reason} -> [{:secret, {:error, reason}} | results]
+            end
+          else
+            results
+          end
+
+        results =
+          if vault.trust do
+            case Crispkey.GPG.Interface.import_trustdb(vault.trust) do
+              {:ok, _} -> [{:trust, :ok} | results]
+              {:error, reason} -> [{:trust, {:error, reason}} | results]
+            end
+          else
+            results
+          end
+
+        Enum.each(results, fn
+          {:public, :ok} -> IO.puts("Imported public key to GPG keyring")
+          {:secret, :ok} -> IO.puts("Imported secret key to GPG keyring")
+          {:trust, :ok} -> IO.puts("Imported trust database")
+          {type, {:error, reason}} -> IO.puts("#{type} import failed: #{inspect(reason)}")
+        end)
+
+      {:error, :not_found} ->
+        IO.puts("Vault not found: #{fingerprint}")
+        System.halt(1)
+    end
+
+    System.halt(0)
+  end
+
+  defp vault_cmd(["delete", fingerprint | _]) do
+    ensure_unlocked!()
+
+    case Manager.delete_vault(fingerprint) do
+      :ok ->
+        IO.puts("Deleted vault: #{fingerprint}")
+
+      {:error, :not_found} ->
+        IO.puts("Vault not found: #{fingerprint}")
+        System.halt(1)
+    end
+
+    System.halt(0)
+  end
+
+  defp vault_cmd(_) do
+    IO.puts("""
+    Usage:
+      crispkey vault list
+      crispkey vault import <fingerprint>
+      crispkey vault export <fingerprint>
+      crispkey vault delete <fingerprint>
+    """)
+
+    System.halt(1)
+  end
+
+  @spec ensure_unlocked!() :: :ok
+  defp ensure_unlocked! do
+    unless Manager.unlocked?() do
+      IO.puts("Vaults are locked. Run 'crispkey unlock' first.")
+      System.halt(1)
+    end
+
+    :ok
   end
 
   @spec list_keys() :: no_return()
   defp list_keys do
     case Crispkey.GPG.Interface.list_public_keys() do
       {:ok, pub_keys} ->
-        IO.puts("\nPublic keys:")
+        IO.puts("\nPublic keys in GPG keyring:")
         Enum.each(pub_keys, &print_key/1)
 
       {:error, {_, msg}} ->
@@ -112,7 +309,7 @@ defmodule Crispkey.CLI do
 
     case Crispkey.GPG.Interface.list_secret_keys() do
       {:ok, sec_keys} ->
-        IO.puts("\nSecret keys:")
+        IO.puts("\nSecret keys in GPG keyring:")
         Enum.each(sec_keys, &print_key/1)
 
       {:error, {_, msg}} ->
@@ -266,6 +463,8 @@ defmodule Crispkey.CLI do
 
   @spec sync([String.t()]) :: no_return()
   defp sync(args) do
+    ensure_unlocked!()
+
     state = Crispkey.Store.LocalState.get_state()
 
     peers =
@@ -398,5 +597,18 @@ defmodule Crispkey.CLI do
     end
 
     passphrase
+  end
+
+  @spec configure_runtime() :: :ok
+  defp configure_runtime do
+    if data_dir = System.get_env("CRISPKEY_DATA_DIR") do
+      Application.put_env(:crispkey, :data_dir, data_dir, persistent: true)
+    end
+
+    if gpg_home = System.get_env("GNUPGHOME") do
+      Application.put_env(:crispkey, :gpg_homedir, gpg_home, persistent: true)
+    end
+
+    :ok
   end
 end

@@ -13,6 +13,30 @@ error() {
     echo "[$(date '+%H:%M:%S')] ERROR: $1" >&2
 }
 
+cleanup() {
+    log "Cleaning up before test execution..."
+    
+    # Stop and remove containers
+    podman stop crispkey-alice crispkey-bob 2>/dev/null || true
+    podman rm crispkey-alice crispkey-bob 2>/dev/null || true
+    
+    # Clear volumes
+    rm -rf "$PROJECT_DIR/test-volumes/alice/config"/* 2>/dev/null || true
+    rm -rf "$PROJECT_DIR/test-volumes/bob/config"/* 2>/dev/null || true
+    mkdir -p "$PROJECT_DIR/test-volumes/alice/config"
+    mkdir -p "$PROJECT_DIR/test-volumes/bob/config"
+    
+    # Rebuild containers
+    log "Rebuilding containers..."
+    podman build -f "$PROJECT_DIR/Containerfile" -t crispkey:latest
+    
+    # Create and start containers
+    podman-compose -f "$PROJECT_DIR/docker-compose.podman.yml" up -d
+    sleep 3
+    
+    log "Cleanup and rebuild complete"
+}
+
 run_test() {
     local name=$1
     local script=$2
@@ -30,6 +54,9 @@ run_test() {
 main() {
     log "Starting full test suite..."
     log "======================================"
+    
+    # Cleanup before starting
+    cleanup
     
     local failures=0
     

@@ -11,7 +11,7 @@ defmodule Crispkey.Vault.ManifestModule do
 
   alias Crispkey.Vault.Types.{Manifest, VaultEntry}
 
-  @spec new(binary()) :: Manifest.t()
+  @spec new(binary() | nil) :: Manifest.t()
   def new(salt \\ nil) do
     %Manifest{
       vaults: %{},

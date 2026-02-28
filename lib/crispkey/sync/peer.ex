@@ -5,10 +5,12 @@ defmodule Crispkey.Sync.Peer do
 
   use GenServer
 
-  alias Crispkey.Sync.{Protocol, Session}
+  alias Crispkey.Sync.{Message, Protocol, Session}
   alias Crispkey.Store.LocalState
   alias Crispkey.Vault.{Manager, ManifestModule}
   alias Crispkey.Vault.Types.Session, as: SessionState
+
+  require Logger
 
   @type state :: %{
           socket: :gen_tcp.socket(),
@@ -112,8 +114,15 @@ defmodule Crispkey.Sync.Peer do
     session_id = generate_session_id()
     msg = Protocol.hello_v2(Crispkey.device_id(), session_id)
     data = Protocol.encode(msg)
-    :gen_tcp.send(state.socket, data)
-    :ok
+
+    case :gen_tcp.send(state.socket, data) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("Failed to send hello: #{inspect(reason)}")
+        :ok
+    end
   end
 
   @spec send_encrypted(state(), map()) :: state()
@@ -123,7 +132,12 @@ defmodule Crispkey.Sync.Peer do
 
   defp send_encrypted(%{socket: socket, session: session} = state, msg) do
     {data, session} = Protocol.encode_encrypted(msg, session)
-    :gen_tcp.send(socket, data)
+
+    case :gen_tcp.send(socket, data) do
+      :ok -> :ok
+      {:error, reason} -> Logger.error("Failed to send encrypted: #{inspect(reason)}")
+    end
+
     %{state | session: session}
   end
 
@@ -132,14 +146,15 @@ defmodule Crispkey.Sync.Peer do
     send_hello_v2(state)
 
     case recv_raw(state) do
-      {:ok, %{"type" => "hello", "device_id" => device_id, "session_id" => session_id_b64}, state} ->
-        session_id = Base.decode64!(session_id_b64)
-        :inet.setopts(state.socket, [{:active, true}])
-        {:ok, %{state | peer_id: device_id, session_id: session_id}}
+      {:ok, %{"type" => "hello", "session_id" => session_id_b64, "device_id" => device_id}, state} ->
+        {:ok, session_id} = Base.decode64(session_id_b64)
 
-      {:ok, %{"type" => "hello", "device_id" => device_id}, state} ->
-        :inet.setopts(state.socket, [{:active, true}])
-        {:ok, %{state | peer_id: device_id}}
+        case :inet.setopts(state.socket, [{:active, true}]) do
+          :ok -> :ok
+          {:error, reason} -> Logger.error("Failed to set socket options: #{inspect(reason)}")
+        end
+
+        {:ok, %{state | peer_id: device_id, session_id: session_id}}
 
       {:error, reason} ->
         {:error, reason}
@@ -149,24 +164,24 @@ defmodule Crispkey.Sync.Peer do
   @spec server_handshake(state()) :: {:ok, state()} | {:error, term()}
   defp server_handshake(state) do
     case recv_raw(state) do
-      {:ok, %{"type" => "hello", "device_id" => device_id, "session_id" => session_id_b64}, state} ->
-        session_id = Base.decode64!(session_id_b64)
+      {:ok, %{"type" => "hello", "session_id" => session_id_b64, "device_id" => device_id}, state} ->
+        {:ok, session_id} = Base.decode64(session_id_b64)
         my_session_id = generate_session_id()
 
         msg = Protocol.hello_v2(Crispkey.device_id(), my_session_id)
         data = Protocol.encode(msg)
-        :gen_tcp.send(state.socket, data)
 
-        :inet.setopts(state.socket, [{:active, true}])
+        case :gen_tcp.send(state.socket, data) do
+          :ok -> :ok
+          {:error, reason} -> Logger.error("Failed to send hello: #{inspect(reason)}")
+        end
+
+        case :inet.setopts(state.socket, [{:active, true}]) do
+          :ok -> :ok
+          {:error, reason} -> Logger.error("Failed to set socket options: #{inspect(reason)}")
+        end
+
         {:ok, %{state | peer_id: device_id, session_id: session_id}}
-
-      {:ok, %{"type" => "hello", "device_id" => device_id}, state} ->
-        msg = Protocol.hello(Crispkey.device_id())
-        data = Protocol.encode(msg)
-        :gen_tcp.send(state.socket, data)
-
-        :inet.setopts(state.socket, [{:active, true}])
-        {:ok, %{state | peer_id: device_id}}
 
       {:error, reason} ->
         {:error, reason}
@@ -240,9 +255,13 @@ defmodule Crispkey.Sync.Peer do
     with {:ok, <<len::32>>} <- :gen_tcp.recv(state.socket, 4, 5000),
          {:ok, data} <- :gen_tcp.recv(state.socket, len, 5000),
          {:ok, msg} <- Protocol.decode(<<len::32, data::binary>>) do
-      {:ok, msg, state}
+      wire_msg = to_wire_map(msg)
+      {:ok, wire_msg, state}
     end
   end
+
+  defp to_wire_map(%_{} = msg), do: Message.to_wire(msg)
+  defp to_wire_map(map) when is_map(map), do: map
 
   @spec extract_messages(binary(), state()) ::
           {:ok, [map()], binary(), state()} | {:continue, binary()}
@@ -269,10 +288,15 @@ defmodule Crispkey.Sync.Peer do
 
   @spec decode_message(binary(), state()) :: {:ok, map(), state()} | {:error, term()}
   defp decode_message(binary, %{session: nil} = state) do
-    Protocol.decode(binary)
-    |> case do
-      {:ok, msg} -> {:ok, msg, state}
-      {:error, reason} -> {:error, reason}
+    case Protocol.decode(binary) do
+      {:ok, %_{} = msg} ->
+        {:ok, Message.to_wire(msg), state}
+
+      {:ok, map} when is_map(map) ->
+        {:ok, map, state}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -291,7 +315,12 @@ defmodule Crispkey.Sync.Peer do
 
   defp exchange_manifest(%{socket: socket, session: session} = state) do
     {data, session} = Protocol.encode_encrypted(%{type: "manifest_request"}, session)
-    :gen_tcp.send(socket, data)
+
+    case :gen_tcp.send(socket, data) do
+      :ok -> :ok
+      {:error, reason} -> Logger.error("Failed to send manifest request: #{inspect(reason)}")
+    end
+
     state = %{state | session: session}
 
     with {:ok, <<len::32>>} <- :gen_tcp.recv(socket, 4, 10_000),
@@ -303,15 +332,14 @@ defmodule Crispkey.Sync.Peer do
   end
 
   @spec request_vault(state(), String.t()) :: :ok | {:error, :timeout}
-  defp request_vault(%{session: nil}, _fingerprint) do
-    {:error, :no_session}
-  end
-
   defp request_vault(%{socket: socket, session: session}, fingerprint) do
     {data, session} =
       Protocol.encode_encrypted(%{type: "vault_request", fingerprints: [fingerprint]}, session)
 
-    :gen_tcp.send(socket, data)
+    case :gen_tcp.send(socket, data) do
+      :ok -> :ok
+      {:error, reason} -> Logger.error("Failed to send vault request: #{inspect(reason)}")
+    end
 
     receive do
       {:tcp, _, _} ->

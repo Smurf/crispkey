@@ -15,13 +15,16 @@ defmodule Crispkey.Sync.Connection do
   4. Transfer encrypted vault files
   """
 
-  alias Crispkey.Sync.{Protocol, Session}
+  alias Crispkey.Sync.{Message, Protocol, Session}
   alias Crispkey.Vault.{Manager, ManifestModule}
   alias Crispkey.Vault.Types.Session, as: SessionState
+
+  require Logger
 
   @type connection :: %{
           socket: :gen_tcp.socket(),
           peer_id: String.t(),
+          session_id: binary() | nil,
           session: SessionState.t() | nil
         }
 
@@ -42,15 +45,19 @@ defmodule Crispkey.Sync.Connection do
   defp handshake(socket) do
     msg = Protocol.hello_v2(Crispkey.device_id(), generate_session_id())
     data = Protocol.encode(msg)
-    :gen_tcp.send(socket, data)
+
+    case :gen_tcp.send(socket, data) do
+      :ok -> :ok
+      {:error, reason} -> Logger.error("Failed to send hello: #{inspect(reason)}")
+    end
 
     case recv_raw(socket) do
-      {:ok, %{"type" => "hello", "device_id" => device_id, "session_id" => session_id_b64}} ->
-        session_id = Base.decode64!(session_id_b64)
-        {:ok, %{socket: socket, peer_id: device_id, session_id: session_id}}
+      {:ok, %{"type" => "hello", "session_id" => session_id_b64}} ->
+        {:ok, session_id} = Base.decode64(session_id_b64)
+        {:ok, %{socket: socket, peer_id: nil, session_id: session_id, session: nil}}
 
-      {:ok, %{"type" => "hello", "device_id" => device_id}} ->
-        {:ok, %{socket: socket, peer_id: device_id, session: nil}}
+      {:ok, %{"type" => "hello"}} ->
+        {:ok, %{socket: socket, peer_id: nil, session_id: nil, session: nil}}
 
       {:error, reason} ->
         :gen_tcp.close(socket)
@@ -94,7 +101,11 @@ defmodule Crispkey.Sync.Connection do
     msg = Protocol.auth_token(auth_token)
 
     {data, _} = Protocol.encode_encrypted(msg, session)
-    :gen_tcp.send(socket, data)
+
+    case :gen_tcp.send(socket, data) do
+      :ok -> :ok
+      {:error, reason} -> Logger.error("Failed to send auth token: #{inspect(reason)}")
+    end
 
     case recv_encrypted(socket, session) do
       {:ok, %{"type" => "auth_ok"}, _} -> :ok
@@ -107,7 +118,11 @@ defmodule Crispkey.Sync.Connection do
   defp exchange_manifest(%{socket: socket, session: session} = _conn) do
     msg = Protocol.manifest_request()
     {data, session} = Protocol.encode_encrypted(msg, session)
-    :gen_tcp.send(socket, data)
+
+    case :gen_tcp.send(socket, data) do
+      :ok -> :ok
+      {:error, reason} -> Logger.error("Failed to send manifest request: #{inspect(reason)}")
+    end
 
     case recv_encrypted(socket, session) do
       {:ok, %{"type" => "manifest", "data" => manifest_data}, _} ->
@@ -122,13 +137,17 @@ defmodule Crispkey.Sync.Connection do
   defp request_vault(%{socket: socket, session: session} = conn, fingerprint) do
     msg = Protocol.vault_request([fingerprint])
     {data, session} = Protocol.encode_encrypted(msg, session)
-    :gen_tcp.send(socket, data)
+
+    case :gen_tcp.send(socket, data) do
+      :ok -> :ok
+      {:error, reason} -> Logger.error("Failed to send vault request: #{inspect(reason)}")
+    end
 
     receive_vault_data(conn, fingerprint, session)
   end
 
   @spec receive_vault_data(connection(), String.t(), SessionState.t()) :: :ok
-  defp receive_vault_data(%{socket: socket} = _conn, expected_fp, session) do
+  defp receive_vault_data(%{socket: socket} = conn, expected_fp, session) do
     case recv_encrypted(socket, session) do
       {:ok, %{"type" => "vault_data", "fingerprint" => fp, "data" => data_b64}, session} ->
         if fp == expected_fp do
@@ -138,7 +157,7 @@ defmodule Crispkey.Sync.Connection do
           :ok
         else
           IO.puts("Unexpected vault fingerprint: #{fp}")
-          receive_vault_data(%{socket: socket}, expected_fp, session)
+          receive_vault_data(conn, expected_fp, session)
         end
 
       {:ok, %{"type" => "ack"}, _} ->
@@ -170,7 +189,11 @@ defmodule Crispkey.Sync.Connection do
       {:ok, <<len::32>>} ->
         case :gen_tcp.recv(socket, len, 5000) do
           {:ok, data} ->
-            Protocol.decode(<<len::32, data::binary>>)
+            case Protocol.decode(<<len::32, data::binary>>) do
+              {:ok, %_{} = msg} -> {:ok, Message.to_wire(msg)}
+              {:ok, map} when is_map(map) -> {:ok, map}
+              error -> error
+            end
 
           {:error, reason} ->
             {:error, reason}

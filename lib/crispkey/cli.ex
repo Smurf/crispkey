@@ -12,11 +12,11 @@ defmodule Crispkey.CLI do
   @spec main([String.t()]) :: no_return()
   def main(args) do
     configure_runtime()
-    Application.ensure_all_started(:crispkey)
+    {:ok, _} = Application.ensure_all_started(:crispkey)
 
     case args do
-      [] -> help()
       ["help" | _] -> help()
+      [] -> help()
       ["init" | _] -> init()
       ["unlock" | _] -> unlock()
       ["lock" | _] -> lock()
@@ -290,8 +290,19 @@ defmodule Crispkey.CLI do
   @spec ensure_unlocked!() :: :ok
   defp ensure_unlocked! do
     unless Manager.unlocked?() do
-      IO.puts("Vaults are locked. Run 'crispkey unlock' first.")
-      System.halt(1)
+      if master_password = System.get_env("CRISPKEY_MASTER_PASSWORD") do
+        case Manager.unlock(master_password) do
+          :ok ->
+            :ok
+
+          {:error, :invalid_password} ->
+            IO.puts("Invalid password from CRISPKEY_MASTER_PASSWORD")
+            System.halt(1)
+        end
+      else
+        IO.puts("Vaults are locked. Run 'crispkey unlock' first.")
+        System.halt(1)
+      end
     end
 
     :ok
@@ -501,7 +512,7 @@ defmodule Crispkey.CLI do
 
     case Connection.connect(peer.host) do
       {:ok, conn} ->
-        result = Connection.sync(conn.socket, remote_password)
+        result = Connection.sync(conn, remote_password)
         Connection.close(conn)
         report_sync_result(peer.id, result)
 
@@ -510,6 +521,7 @@ defmodule Crispkey.CLI do
     end
   end
 
+  @doc false
   defp report_sync_result(peer_id, :ok) do
     IO.puts("Sync complete with #{peer_id}")
   end

@@ -18,10 +18,34 @@ error() {
     echo "[$(date '+%H:%M:%S')] ERROR: $1" >&2
 }
 
+cleanup() {
+    log "Cleaning up before test execution..."
+    
+    # Stop and remove containers
+    podman stop "$ALICE" "$BOB" 2>/dev/null || true
+    podman rm "$ALICE" "$BOB" 2>/dev/null || true
+    
+    # Clear volumes
+    rm -rf "$PROJECT_DIR/test-volumes/alice/config"/* 2>/dev/null || true
+    rm -rf "$PROJECT_DIR/test-volumes/bob/config"/* 2>/dev/null || true
+    mkdir -p "$PROJECT_DIR/test-volumes/alice/config"
+    mkdir -p "$PROJECT_DIR/test-volumes/bob/config"
+    
+    # Rebuild containers
+    log "Rebuilding containers..."
+    podman build -f "$PROJECT_DIR/Containerfile" -t crispkey:latest
+    
+    # Create and start containers
+    podman-compose -f "$PROJECT_DIR/docker-compose.podman.yml" up -d
+    sleep 3
+    
+    log "Cleanup and rebuild complete"
+}
+
 exec_in() {
     local container=$1
     shift
-    podman exec -u testuser -e HOME=/home/testuser -e GNUPGHOME=/home/testuser/.gnupg -e CRISPKEY_DATA_DIR=/home/testuser/.config/crispkey "$container" "$@"
+    podman exec -u testuser -e HOME=/home/testuser -e GNUPGHOME=/home/testuser/.gnupg -e CRISPKEY_DATA_DIR=/home/testuser/.config/crispkey -e CRISPKEY_MASTER_PASSWORD="$MASTER_PASSWORD" "$container" "$@"
 }
 
 get_device_id() {
@@ -36,7 +60,7 @@ get_alice_ip() {
 count_vaults() {
     local container=$1
     local count
-    count=$(exec_in "$container" ls /home/testuser/.config/crispkey/vaults/*.vault 2>/dev/null | wc -l | tr -d ' ')
+    count=$(exec_in "$container" sh -c 'ls /home/testuser/.config/crispkey/vaults/*.vault 2>/dev/null | wc -l' | tr -d ' ')
     echo "$count"
 }
 
@@ -48,7 +72,7 @@ count_gpg_keys() {
 }
 
 get_alice_vault_fps() {
-    exec_in "$ALICE" ls /home/testuser/.config/crispkey/vaults/*.vault 2>/dev/null | xargs -I{} basename {} .vault | sort || true
+    exec_in "$ALICE" sh -c 'ls /home/testuser/.config/crispkey/vaults/*.vault 2>/dev/null' | xargs -I{} basename {} .vault | sort || true
 }
 
 unlock_vaults() {
@@ -195,6 +219,9 @@ test_vault_decryption() {
 
 main() {
     log "Starting vault sync tests..."
+    
+    # Cleanup before starting
+    cleanup
     
     local failures=0
     

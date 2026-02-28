@@ -16,6 +16,30 @@ error() {
     echo "[$(date '+%H:%M:%S')] ERROR: $1" >&2
 }
 
+cleanup() {
+    log "Cleaning up before test execution..."
+    
+    # Stop and remove containers
+    podman stop "$ALICE" "$BOB" 2>/dev/null || true
+    podman rm "$ALICE" "$BOB" 2>/dev/null || true
+    
+    # Clear volumes
+    rm -rf "$PROJECT_DIR/test-volumes/alice/config"/* 2>/dev/null || true
+    rm -rf "$PROJECT_DIR/test-volumes/bob/config"/* 2>/dev/null || true
+    mkdir -p "$PROJECT_DIR/test-volumes/alice/config"
+    mkdir -p "$PROJECT_DIR/test-volumes/bob/config"
+    
+    # Rebuild containers
+    log "Rebuilding containers..."
+    podman build -f "$PROJECT_DIR/Containerfile" -t crispkey:latest
+    
+    # Create and start containers
+    podman-compose -f "$PROJECT_DIR/docker-compose.podman.yml" up -d
+    sleep 3
+    
+    log "Cleanup and rebuild complete"
+}
+
 exec_in() {
     local container=$1
     shift
@@ -98,6 +122,9 @@ test_pairing() {
 
 main() {
     log "Starting pairing tests..."
+    
+    # Cleanup before starting
+    cleanup
     
     local failures=0
     

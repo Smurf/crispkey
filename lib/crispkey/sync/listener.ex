@@ -7,6 +7,8 @@ defmodule Crispkey.Sync.Listener do
 
   alias Crispkey.Sync.Peer
 
+  require Logger
+
   @type state :: %{
           listen_socket: :gen_tcp.socket(),
           connections: %{String.t() => pid()},
@@ -54,7 +56,10 @@ defmodule Crispkey.Sync.Listener do
       {:ok, socket} ->
         case Peer.start(socket) do
           {:ok, peer_pid} ->
-            :gen_tcp.controlling_process(socket, peer_pid)
+            case :gen_tcp.controlling_process(socket, peer_pid) do
+              :ok -> :ok
+              {:error, reason} -> Logger.error("Failed to assign control: #{inspect(reason)}")
+            end
 
           _ ->
             :ok
@@ -87,7 +92,11 @@ defmodule Crispkey.Sync.Listener do
       {:ok, socket} ->
         case Peer.start(socket, is_client: true) do
           {:ok, peer_pid} ->
-            :gen_tcp.controlling_process(socket, peer_pid)
+            case :gen_tcp.controlling_process(socket, peer_pid) do
+              :ok -> :ok
+              {:error, reason} -> Logger.error("Failed to assign control: #{inspect(reason)}")
+            end
+
             {:reply, {:ok, peer_pid}, state}
 
           {:error, reason} ->

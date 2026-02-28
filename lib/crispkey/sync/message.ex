@@ -6,13 +6,18 @@ defmodule Crispkey.Sync.Message do
   The decode function safely converts wire data to typed structs.
   """
 
-  @version 1
+  @version 2
   def version, do: @version
 
   defmodule Hello do
-    @moduledoc "Handshake message."
-    defstruct [:device_id, version: 1]
-    @type t :: %__MODULE__{device_id: String.t(), version: pos_integer()}
+    @moduledoc "Handshake message (v2 protocol)."
+    defstruct [:device_id, :session_id, version: 2]
+
+    @type t :: %__MODULE__{
+            device_id: String.t(),
+            session_id: binary() | nil,
+            version: 2
+          }
   end
 
   defmodule Auth do
@@ -102,11 +107,6 @@ defmodule Crispkey.Sync.Message do
 
   def message_types, do: @message_types
 
-  @spec hello(String.t()) :: Hello.t()
-  def hello(device_id) do
-    %Hello{device_id: device_id, version: @version}
-  end
-
   @spec auth(String.t()) :: Auth.t()
   def auth(password_hash) do
     %Auth{password_hash: password_hash}
@@ -184,8 +184,14 @@ defmodule Crispkey.Sync.Message do
   Converts a message struct to a wire-compatible map (atoms become strings).
   """
   @spec to_wire(t()) :: map()
-  def to_wire(%Hello{device_id: device_id, version: version}) do
-    %{type: "hello", device_id: device_id, version: version}
+  def to_wire(%Hello{device_id: device_id, version: version, session_id: session_id}) do
+    map = %{type: "hello", device_id: device_id, version: version}
+
+    if session_id do
+      Map.put(map, :session_id, Base.encode64(session_id))
+    else
+      map
+    end
   end
 
   def to_wire(%Auth{password_hash: hash}) do
@@ -245,18 +251,34 @@ defmodule Crispkey.Sync.Message do
   def from_wire(_), do: {:error, :missing_type_field}
 
   @spec from_wire_type(module(), map()) :: {:ok, t()} | {:error, term()}
+  defp from_wire_type(Hello, %{
+         "device_id" => device_id,
+         "version" => version,
+         "session_id" => session_id_b64
+       }) do
+    with :ok <- validate_device_id(device_id),
+         :ok <- validate_version(version),
+         {:ok, session_id} <- decode_session_id(session_id_b64) do
+      {:ok, %Hello{device_id: device_id, version: version, session_id: session_id}}
+    end
+  end
+
   defp from_wire_type(Hello, %{"device_id" => device_id, "version" => version}) do
     with :ok <- validate_device_id(device_id),
          :ok <- validate_version(version) do
-      {:ok, %Hello{device_id: device_id, version: version}}
+      {:ok, %Hello{device_id: device_id, version: version, session_id: nil}}
     end
   end
 
   defp from_wire_type(Hello, %{"device_id" => device_id}) do
     with :ok <- validate_device_id(device_id) do
-      {:ok, %Hello{device_id: device_id, version: @version}}
+      {:ok, %Hello{device_id: device_id, version: @version, session_id: nil}}
     end
   end
+
+  defp decode_session_id(nil), do: {:ok, nil}
+  defp decode_session_id(b64) when is_binary(b64), do: Base.decode64(b64)
+  defp decode_session_id(_), do: {:error, :invalid_session_id}
 
   defp from_wire_type(Auth, %{"password_hash" => hash}) when is_binary(hash) do
     {:ok, %Auth{password_hash: hash}}
@@ -284,12 +306,21 @@ defmodule Crispkey.Sync.Message do
     {:ok, %Request{fingerprints: fps, types: [:public, :secret, :trust]}}
   end
 
-  defp from_wire_type(KeyData, %{"fingerprint" => fp, "key_type" => type, "data" => data})
+  defp from_wire_type(KeyData, %{
+         "fingerprint" => fp,
+         "key_type" => type,
+         "data" => data,
+         "metadata" => meta
+       })
        when is_binary(fp) and is_binary(type) and is_binary(data) do
-    meta = Map.get(data, "metadata", %{})
-
     {:ok,
      %KeyData{fingerprint: fp, key_type: string_to_key_type(type), data: data, metadata: meta}}
+  end
+
+  defp from_wire_type(KeyData, %{"fingerprint" => fp, "key_type" => type, "data" => data})
+       when is_binary(fp) and is_binary(type) and is_binary(data) do
+    {:ok,
+     %KeyData{fingerprint: fp, key_type: string_to_key_type(type), data: data, metadata: %{}}}
   end
 
   defp from_wire_type(TrustData, %{"data" => data}) when is_binary(data) do

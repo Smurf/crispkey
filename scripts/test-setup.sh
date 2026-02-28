@@ -18,6 +18,30 @@ error() {
     echo "[$(date '+%H:%M:%S')] ERROR: $1" >&2
 }
 
+cleanup() {
+    log "Cleaning up before test execution..."
+    
+    # Stop and remove containers
+    podman stop "$ALICE" "$BOB" 2>/dev/null || true
+    podman rm "$ALICE" "$BOB" 2>/dev/null || true
+    
+    # Clear volumes
+    rm -rf "$PROJECT_DIR/test-volumes/alice/config"/* 2>/dev/null || true
+    rm -rf "$PROJECT_DIR/test-volumes/bob/config"/* 2>/dev/null || true
+    mkdir -p "$PROJECT_DIR/test-volumes/alice/config"
+    mkdir -p "$PROJECT_DIR/test-volumes/bob/config"
+    
+    # Rebuild containers
+    log "Rebuilding containers..."
+    podman build -f "$PROJECT_DIR/Containerfile" -t crispkey:latest
+    
+    # Create and start containers
+    podman-compose -f "$PROJECT_DIR/docker-compose.podman.yml" up -d
+    sleep 3
+    
+    log "Cleanup and rebuild complete"
+}
+
 check_container() {
     local container=$1
     if ! podman ps --format '{{.Names}}' | grep -q "^${container}$"; then
@@ -30,7 +54,7 @@ check_container() {
 exec_in() {
     local container=$1
     shift
-    podman exec -u testuser -e HOME=/home/testuser -e GNUPGHOME=/home/testuser/.gnupg -e CRISPKEY_DATA_DIR=/home/testuser/.config/crispkey "$container" "$@"
+    podman exec -u testuser -e HOME=/home/testuser -e GNUPGHOME=/home/testuser/.gnupg -e CRISPKEY_DATA_DIR=/home/testuser/.config/crispkey -e CRISPKEY_MASTER_PASSWORD="$MASTER_PASSWORD" "$container" "$@"
 }
 
 clear_state() {
@@ -83,15 +107,8 @@ generate_test_key() {
     if [ -n "$fp" ]; then
         log "Generated key fingerprint: $fp"
         
-        # Import to vault
+        # Import to vault - now uses CRISPKEY_MASTER_PASSWORD env var for auto-unlock
         log "Importing key to vault..."
-        exec_in "$container" expect -c "
-            spawn crispkey unlock
-            expect \"master password\"
-            send \"$MASTER_PASSWORD\\r\"
-            expect eof
-        " 2>/dev/null || true
-        
         exec_in "$container" crispkey vault import "$fp" 2>&1 || {
             log "Warning: Vault import may have failed"
         }
@@ -121,6 +138,9 @@ verify_daemon() {
 
 main() {
     log "Starting vault test setup..."
+    
+    # Cleanup before starting
+    cleanup
     
     # Check containers are running
     check_container "$ALICE" || exit 1

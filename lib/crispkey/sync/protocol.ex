@@ -37,9 +37,6 @@ defmodule Crispkey.Sync.Protocol do
   @spec version() :: pos_integer()
   def version, do: @version
 
-  @spec hello(String.t()) :: Message.Hello.t()
-  def hello(device_id), do: Message.hello(device_id)
-
   @spec hello_v2(String.t(), binary()) :: map()
   def hello_v2(device_id, session_id) do
     %{

@@ -53,6 +53,7 @@ main() {
         error "$failures test suite(s) FAILED"
         exit 1
     fi
+    podman-compose -f docker-compose.podman.yml down
 }
 
 main "$@"

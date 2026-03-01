@@ -199,10 +199,12 @@ defmodule Crispkey.Vault.Crypto do
 
   @spec constant_time_compare(binary(), binary()) :: boolean()
   def constant_time_compare(a, b) when is_binary(a) and is_binary(b) do
-    if byte_size(a) != byte_size(b) do
-      false
-    else
-      :crypto.hash(:sha256, a) == :crypto.hash(:sha256, b)
-    end
+    byte_size(a) == byte_size(b) and constant_time_compare_bytes(a, b) == 0
+  end
+
+  defp constant_time_compare_bytes(<<>>, <<>>), do: 0
+
+  defp constant_time_compare_bytes(<<x, rest_a::binary>>, <<y, rest_b::binary>>) do
+    Bitwise.bxor(x, y) + constant_time_compare_bytes(rest_a, rest_b)
   end
 end

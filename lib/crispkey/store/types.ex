@@ -23,6 +23,7 @@ defmodule Crispkey.Store.State do
   defstruct [
     :device_id,
     :sync_password_hash,
+    :sync_auth_method,
     initialized: false,
     peers: %{},
     key_syncs: %{},
@@ -34,6 +35,7 @@ defmodule Crispkey.Store.State do
           device_id: String.t(),
           initialized: boolean(),
           sync_password_hash: String.t() | nil,
+          sync_auth_method: :password | :yubikey,
           peers: %{String.t() => Crispkey.Store.Peer.t()},
           key_syncs: %{String.t() => %{String.t() => DateTime.t()}},
           last_sync: DateTime.t() | nil,

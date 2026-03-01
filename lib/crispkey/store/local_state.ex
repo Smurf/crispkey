@@ -69,6 +69,21 @@ defmodule Crispkey.Store.LocalState do
     GenServer.call(__MODULE__, :yubikey_only?)
   end
 
+  @spec set_yubikey_only(boolean()) :: :ok
+  def set_yubikey_only(value) when is_boolean(value) do
+    GenServer.call(__MODULE__, {:set_yubikey_only, value})
+  end
+
+  @spec sync_auth_method() :: :password | :yubikey
+  def sync_auth_method do
+    GenServer.call(__MODULE__, :sync_auth_method)
+  end
+
+  @spec set_sync_auth_method(:password | :yubikey) :: :ok
+  def set_sync_auth_method(method) do
+    GenServer.call(__MODULE__, {:set_sync_auth_method, method})
+  end
+
   @impl true
   @spec init([]) :: {:ok, state()}
   def init([]) do
@@ -131,6 +146,22 @@ defmodule Crispkey.Store.LocalState do
     {:reply, state.yubikey_only, state}
   end
 
+  def handle_call({:set_yubikey_only, value}, _from, state) do
+    new_state = %{state | yubikey_only: value}
+    save_state(new_state)
+    {:reply, :ok, new_state}
+  end
+
+  def handle_call(:sync_auth_method, _from, state) do
+    {:reply, state.sync_auth_method, state}
+  end
+
+  def handle_call({:set_sync_auth_method, method}, _from, state) do
+    new_state = %{state | sync_auth_method: method}
+    save_state(new_state)
+    {:reply, :ok, new_state}
+  end
+
   @spec load_state() :: state()
   defp load_state do
     path = state_path()
@@ -142,6 +173,7 @@ defmodule Crispkey.Store.LocalState do
       last_sync: nil,
       initialized: false,
       sync_password_hash: nil,
+      sync_auth_method: :password,
       yubikey_only: false
     }
 
@@ -165,6 +197,7 @@ defmodule Crispkey.Store.LocalState do
     device_id = Map.get(raw_state, "device_id", default.device_id)
     initialized = Map.get(raw_state, "initialized", false)
     sync_password_hash = Map.get(raw_state, "sync_password_hash")
+    sync_auth_method = parse_sync_auth_method(Map.get(raw_state, "sync_auth_method"))
     yubikey_only = Map.get(raw_state, "yubikey_only", false)
     last_sync = parse_datetime(Map.get(raw_state, "last_sync"))
 
@@ -182,12 +215,17 @@ defmodule Crispkey.Store.LocalState do
       device_id: device_id,
       initialized: initialized,
       sync_password_hash: sync_password_hash,
+      sync_auth_method: sync_auth_method,
       peers: peers,
       key_syncs: key_syncs,
       last_sync: last_sync,
       yubikey_only: yubikey_only
     }
   end
+
+  @spec parse_sync_auth_method(String.t() | nil) :: :password | :yubikey
+  defp parse_sync_auth_method("yubikey"), do: :yubikey
+  defp parse_sync_auth_method(_), do: :password
 
   @spec parse_peers(map()) :: %{String.t() => Peer.t()}
   defp parse_peers(peers_map) do
@@ -244,6 +282,7 @@ defmodule Crispkey.Store.LocalState do
       "device_id" => state.device_id,
       "initialized" => state.initialized,
       "sync_password_hash" => state.sync_password_hash,
+      "sync_auth_method" => Atom.to_string(state.sync_auth_method),
       "yubikey_only" => state.yubikey_only,
       "peers" => peers_to_json(state.peers),
       "key_syncs" => key_syncs_to_json(state.key_syncs),

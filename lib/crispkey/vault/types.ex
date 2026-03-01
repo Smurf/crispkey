@@ -8,6 +8,7 @@ defmodule Crispkey.Vault.Types do
   defmodule WrappedKeyPackage do
     @moduledoc """
     Contains the master key wrapped for YubiKey authentication.
+    Each package is associated with a specific YubiKey credential.
     """
     defstruct [
       :encrypted_master_key,
@@ -25,6 +26,17 @@ defmodule Crispkey.Vault.Types do
             wrapped_dek: binary(),
             salt: binary(),
             credential_id: binary()
+          }
+  end
+
+  defmodule WrappedKeyStore do
+    @moduledoc """
+    Storage for multiple wrapped key packages (one per YubiKey).
+    """
+    defstruct [:packages]
+
+    @type t :: %__MODULE__{
+            packages: [WrappedKeyPackage.t()]
           }
   end
 

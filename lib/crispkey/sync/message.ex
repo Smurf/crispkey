@@ -38,6 +38,24 @@ defmodule Crispkey.Sync.Message do
     @type t :: %__MODULE__{}
   end
 
+  defmodule AuthYubikeyChallenge do
+    @moduledoc "YubiKey authentication challenge request."
+    defstruct [:challenge]
+    @type t :: %__MODULE__{challenge: binary()}
+  end
+
+  defmodule AuthYubikeyResponse do
+    @moduledoc "YubiKey authentication response (signature)."
+    defstruct [:signature]
+    @type t :: %__MODULE__{signature: binary()}
+  end
+
+  defmodule AuthYubikeyRequest do
+    @moduledoc "Request to use YubiKey authentication for sync."
+    defstruct []
+    @type t :: %__MODULE__{}
+  end
+
   defmodule Inventory do
     @moduledoc "Key inventory message."
     defstruct [:keys]
@@ -85,6 +103,9 @@ defmodule Crispkey.Sync.Message do
           | Auth.t()
           | AuthOk.t()
           | AuthFail.t()
+          | AuthYubikeyChallenge.t()
+          | AuthYubikeyResponse.t()
+          | AuthYubikeyRequest.t()
           | Inventory.t()
           | Request.t()
           | KeyData.t()
@@ -97,6 +118,9 @@ defmodule Crispkey.Sync.Message do
     "auth" => Auth,
     "auth_ok" => AuthOk,
     "auth_fail" => AuthFail,
+    "auth_yubikey_challenge" => AuthYubikeyChallenge,
+    "auth_yubikey_response" => AuthYubikeyResponse,
+    "auth_yubikey_request" => AuthYubikeyRequest,
     "inventory" => Inventory,
     "request" => Request,
     "key_data" => KeyData,
@@ -206,6 +230,18 @@ defmodule Crispkey.Sync.Message do
     %{"type" => "auth_fail"}
   end
 
+  def to_wire(%AuthYubikeyChallenge{challenge: challenge}) do
+    %{"type" => "auth_yubikey_challenge", "challenge" => Base.encode64(challenge)}
+  end
+
+  def to_wire(%AuthYubikeyResponse{signature: signature}) do
+    %{"type" => "auth_yubikey_response", "signature" => Base.encode64(signature)}
+  end
+
+  def to_wire(%AuthYubikeyRequest{}) do
+    %{"type" => "auth_yubikey_request"}
+  end
+
   def to_wire(%Inventory{keys: keys}) do
     %{"type" => "inventory", "keys" => keys}
   end
@@ -286,6 +322,22 @@ defmodule Crispkey.Sync.Message do
 
   defp from_wire_type(AuthFail, %{}) do
     {:ok, %AuthFail{}}
+  end
+
+  defp from_wire_type(AuthYubikeyChallenge, %{"challenge" => challenge_b64}) do
+    with {:ok, challenge} <- Base.decode64(challenge_b64) do
+      {:ok, %AuthYubikeyChallenge{challenge: challenge}}
+    end
+  end
+
+  defp from_wire_type(AuthYubikeyResponse, %{"signature" => signature_b64}) do
+    with {:ok, signature} <- Base.decode64(signature_b64) do
+      {:ok, %AuthYubikeyResponse{signature: signature}}
+    end
+  end
+
+  defp from_wire_type(AuthYubikeyRequest, %{}) do
+    {:ok, %AuthYubikeyRequest{}}
   end
 
   defp from_wire_type(Inventory, %{"keys" => keys}) when is_list(keys) do

@@ -116,17 +116,17 @@ defmodule Crispkey.FIDO2.Client do
   end
 
   defp run_fido2_cred_with_pin(pin, temp_input, temp_output, device) do
-    cmd = "printf '%s' '#{pin}' | fido2-cred -M -i #{temp_input} -o #{temp_output} #{device} es256 2>&1"
+    cmd =
+      "printf '%s' '#{pin}' | fido2-cred -M -i #{temp_input} -o #{temp_output} #{device} es256 2>&1"
 
     result = :os.cmd(String.to_charlist(cmd))
     output = List.to_string(result)
-    
+
     if String.contains?(output, "credentialId:") or String.contains?(output, "publicKey:") do
       {output, 0}
     else
       {output, 1}
     end
-  end
   end
 
   defp parse_enrollment_response(output) do
@@ -260,14 +260,45 @@ defmodule Crispkey.FIDO2.Client do
   end
 
   @doc """
-  Get the wrapped key for authentication.
+  Get all enrolled wrapped keys.
+  """
+  @spec get_wrapped_keys() :: {:ok, [Types.WrappedKey.t()]} | {:error, :not_enrolled}
+  def get_wrapped_keys do
+    case load_wrapped_keys() do
+      {:ok, keys} when keys != [] -> {:ok, keys}
+      {:ok, []} -> {:error, :not_enrolled}
+      {:error, :not_found} -> {:error, :not_enrolled}
+      error -> error
+    end
+  end
+
+  @doc """
+  Get the first enrolled wrapped key (for backward compatibility).
   """
   @spec get_wrapped_key() :: {:ok, Types.WrappedKey.t()} | {:error, :not_enrolled}
   def get_wrapped_key do
-    case load_wrapped_keys() do
+    case get_wrapped_keys() do
       {:ok, [key | _]} -> {:ok, key}
       {:ok, []} -> {:error, :not_enrolled}
-      {:error, :not_found} -> {:error, :not_enrolled}
+      error -> error
+    end
+  end
+
+  @doc """
+  Get a specific wrapped key by credential ID.
+  """
+  @spec get_wrapped_key_by_credential(binary()) ::
+          {:ok, Types.WrappedKey.t()} | {:error, :not_found}
+  def get_wrapped_key_by_credential(credential_id) do
+    case load_wrapped_keys() do
+      {:ok, keys} ->
+        case Enum.find(keys, fn k -> k.credential_id == credential_id end) do
+          nil -> {:error, :not_found}
+          key -> {:ok, key}
+        end
+
+      error ->
+        error
     end
   end
 

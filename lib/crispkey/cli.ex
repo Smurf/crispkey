@@ -26,11 +26,42 @@ defmodule Crispkey.CLI do
       ["daemon" | _] -> daemon()
       ["discover" | rest] -> discover(rest)
       ["pair", target] -> pair(target)
-      ["sync" | rest] -> sync(rest)
+      ["sync" | rest] -> sync_cmd(rest)
       ["vault" | rest] -> vault_cmd(rest)
       ["yubikey" | rest] -> yubikey_cmd(rest)
       _ -> help()
     end
+  end
+
+  @spec sync_cmd([String.t()]) :: no_return()
+  defp sync_cmd(args) do
+    case args do
+      ["auth-method", method] ->
+        set_sync_auth_method(method)
+
+      _ ->
+        sync(args)
+    end
+  end
+
+  @spec set_sync_auth_method(String.t()) :: no_return()
+  defp set_sync_auth_method(method) do
+    case method do
+      "yubikey" ->
+        LocalState.set_sync_auth_method(:yubikey)
+        IO.puts("Sync auth method set to: YubiKey (required for sync)")
+        IO.puts("During sync, both devices must tap their YubiKey")
+
+      "password" ->
+        LocalState.set_sync_auth_method(:password)
+        IO.puts("Sync auth method set to: Password")
+
+      _ ->
+        IO.puts("Usage: crispkey sync auth-method <yubikey|password>")
+        System.halt(1)
+    end
+
+    System.halt(0)
   end
 
   @spec help() :: no_return()
@@ -49,19 +80,20 @@ defmodule Crispkey.CLI do
 
     YubiKey Commands:
       crispkey yubikey enroll      Enroll a new YubiKey/FIDO2 device
-      crispkey yubikey unlock      Unlock vaults with enrolled YubiKey
-      crispkey yubikey list        List enrolled YubiKey credentials
+      crispkey yubikey unlock     Unlock vaults with enrolled YubiKey
+      crispkey yubikey list       List enrolled YubiKey credentials
       crispkey yubikey remove <id> Remove enrolled credential
-      crispkey yubikey status      Show YubiKey availability
+      crispkey yubikey status     Show YubiKey availability
 
     Sync Commands:
-      crispkey status            Show sync status
-      crispkey keys              List GPG keys in keyring
-      crispkey devices           List paired devices
-      crispkey daemon            Start background sync daemon
-      crispkey discover [sec]    Find devices on network
-      crispkey pair <id|host>    Pair with a device
-      crispkey sync [device]     Sync vaults with device(s)
+      crispkey sync auth-method <yubikey|password>  Set sync authentication method
+      crispkey sync [device]      Sync vaults with device(s)
+      crispkey status              Show sync status
+      crispkey keys                List GPG keys in keyring
+      crispkey devices             List paired devices
+      crispkey daemon              Start background sync daemon
+      crispkey discover [sec]     Find devices on network
+      crispkey pair <id|host>     Pair with a device
     """)
 
     System.halt(0)
@@ -271,7 +303,7 @@ defmodule Crispkey.CLI do
     end
 
     if Manager.yubikey_enrolled?() do
-      IO.puts("Warning: A YubiKey is already enrolled. Enrolling another will replace it.")
+      IO.puts("Warning: A YubiKey is already enrolled. Adding another for backup.")
     end
 
     pin = get_pin("Enter YubiKey PIN: ")
@@ -283,6 +315,7 @@ defmodule Crispkey.CLI do
       :ok ->
         IO.puts("YubiKey enrolled successfully!")
         IO.puts("You can now unlock your vaults with 'crispkey yubikey unlock'")
+        IO.puts("Multiple YubiKeys can be enrolled for backup purposes.")
         System.halt(0)
 
       {:error, :not_available} ->

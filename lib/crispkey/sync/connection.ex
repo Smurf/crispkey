@@ -100,7 +100,9 @@ defmodule Crispkey.Sync.Connection do
   end
 
   @spec authenticate(connection()) :: :ok | {:error, term()}
-  defp authenticate(%{socket: socket, session: session} = _conn) do
+  defp authenticate(%{socket: socket, session: session} = conn) do
+    sync_auth_method = LocalState.sync_auth_method()
+
     auth_token = Session.compute_auth_token(session)
     msg = Protocol.auth_token(auth_token)
 
@@ -111,6 +113,111 @@ defmodule Crispkey.Sync.Connection do
       {:error, reason} -> Logger.error("Failed to send auth token: #{inspect(reason)}")
     end
 
+    case recv_encrypted(socket, session) do
+      {:ok, %{"type" => "auth_ok"}, _} ->
+        :ok
+
+      {:ok, %{"type" => "auth_yubikey_challenge", "challenge" => challenge_b64}, session} ->
+        IO.puts("[CLIENT] Received YubiKey challenge")
+        handle_yubikey_authentication(conn, challenge_b64, session)
+
+      {:ok, %{"type" => "auth_fail"}, _} ->
+        {:error, :auth_failed}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @spec handle_yubikey_authentication(connection(), String.t(), SessionState.t()) ::
+          :ok | {:error, term()}
+  defp handle_yubikey_authentication(%{socket: socket}, challenge_b64, session) do
+    case Base.decode64(challenge_b64) do
+      {:ok, challenge} ->
+        case perform_yubikey_auth(challenge) do
+          {:ok, assertion} ->
+            msg = %{type: "auth_yubikey_response", signature: Base.encode64(assertion.signature)}
+            {data, session} = Protocol.encode_encrypted(msg, session)
+
+            case :gen_tcp.send(socket, data) do
+              :ok ->
+                :ok
+
+              {:error, reason} ->
+                Logger.error("Failed to send YubiKey response: #{inspect(reason)}")
+            end
+
+            case recv_encrypted(socket, session) do
+              {:ok, %{"type" => "auth_yubikey_challenge", "challenge" => server_challenge_b64},
+               session} ->
+                IO.puts("[CLIENT] Received server YubiKey challenge")
+
+                case Base.decode64(server_challenge_b64) do
+                  {:ok, server_challenge} ->
+                    case perform_yubikey_auth(server_challenge) do
+                      {:ok, server_assertion} ->
+                        server_msg = %{
+                          type: "auth_yubikey_response",
+                          signature: Base.encode64(server_assertion.signature)
+                        }
+
+                        {server_data, _session} = Protocol.encode_encrypted(server_msg, session)
+
+                        case :gen_tcp.send(socket, server_data) do
+                          :ok ->
+                            :ok
+
+                          {:error, reason} ->
+                            Logger.error(
+                              "Failed to send server YubiKey response: #{inspect(reason)}"
+                            )
+                        end
+
+                        receive_auth_result(socket, session)
+
+                      {:error, reason} ->
+                        IO.puts("[CLIENT] Server YubiKey auth failed: #{inspect(reason)}")
+                        {:error, :yubikey_failed}
+                    end
+
+                  _ ->
+                    {:error, :invalid_challenge}
+                end
+
+              {:ok, %{"type" => "auth_ok"}, _} ->
+                :ok
+
+              {:ok, %{"type" => "auth_fail"}, _} ->
+                {:error, :auth_failed}
+
+              {:error, reason} ->
+                {:error, reason}
+            end
+
+          {:error, reason} ->
+            IO.puts("[CLIENT] YubiKey authentication failed: #{inspect(reason)}")
+            {:error, reason}
+        end
+
+      _ ->
+        {:error, :invalid_challenge}
+    end
+  end
+
+  @spec perform_yubikey_auth(binary()) ::
+          {:ok, Crispkey.FIDO2.Types.Assertion.t()} | {:error, term()}
+  defp perform_yubikey_auth(challenge) do
+    case Crispkey.FIDO2.Client.get_wrapped_key() do
+      {:ok, wrapped_key} ->
+        Crispkey.FIDO2.Client.authenticate(wrapped_key, challenge)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @spec receive_auth_result(:gen_tcp.socket(), SessionState.t()) :: :ok | {:error, term()}
+  defp receive_auth_result(socket, session) do
     case recv_encrypted(socket, session) do
       {:ok, %{"type" => "auth_ok"}, _} -> :ok
       {:ok, %{"type" => "auth_fail"}, _} -> {:error, :auth_failed}

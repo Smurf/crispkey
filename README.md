@@ -11,6 +11,10 @@ GPG key synchronization across devices using encrypted vaults and peer-to-peer s
 - **Encrypted Vaults**: Keys stored in individually encrypted vault files
 - **Separate Passwords**: Master password for vaults, sync password for authentication
 - **Hardware Key Support**: Unlock vaults with YubiKey or FIDO2 device
+- **Multiple YubiKeys**: Add backup YubiKeys for redundancy
+- **Hybrid Unlock**: Try YubiKey first, fallback to password
+- **YubiKey-only Mode**: Initialize vault with YubiKey only (no password)
+- **YubiKey Sync**: Require YubiKey tap during sync authentication
 - **Encrypted Transport**: All sync communication encrypted with session keys
 - **P2P Discovery**: Find other devices on your local network via UDP multicast
 - **Incremental Sync**: Only transfer changed vaults
@@ -69,16 +73,25 @@ mix escript.build
 │                         ▼                                       │
 │              AES-256-GCM Encrypted Vault                         │
 ├─────────────────────────────────────────────────────────────────┤
-│  YubiKey Path (optional):                                       │
+│  YubiKey Path (optional - multiple keys supported):            │
 │  1. Generate random DEK                                         │
 │  2. Wrap master key with DEK                                     │
-│  3. Store DEK wrapped by FIDO2 credential                       │
-│  4. Unlock requires PIN + touch                                  │
+│  3. Store DEK wrapped by FIDO2 credential                      │
+│  4. Each YubiKey stored separately in wrapped_keys/             │
+│  5. Unlock tries each key until one succeeds                    │
+│                                                                  │
+│  YubiKey-only mode:                                             │
+│  - Initialize with --yubikey flag                               │
+│  - No password fallback - YubiKey required                       │
 ├─────────────────────────────────────────────────────────────────┤
 │  Sync Password → HKDF(session_id) → Session Key                 │
 │                         │                                       │
 │                         ▼                                       │
 │              AES-256-GCM Encrypted Transport                    │
+│                                                                  │
+│  YubiKey sync authentication (optional):                        │
+│  - Set with: crispkey sync auth-method yubikey                 │
+│  - Both devices must tap their YubiKeys during sync              │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -90,17 +103,16 @@ mix escript.build
 ## Vault Commands
 
 ```bash
-# Initialize vault system (set master + sync passwords)
+# Initialize vault system with password
 crispkey init
 
-# Unlock vaults with master password
+# Initialize vault system with YubiKey only (no password)
+crispkey init --yubikey
+
+# Unlock vaults (tries YubiKey first if enrolled, then password)
 crispkey unlock
 
-# Unlock vaults with YubiKey (if enrolled)
-crispkey unlock
-# Press Enter when prompted to use YubiKey
-
-# Or directly:
+# Unlock vaults with YubiKey directly
 crispkey yubikey unlock
 
 # Lock vaults (clear master key from memory)
@@ -126,12 +138,13 @@ crispkey vault delete <fingerprint>
 crispkey yubikey status
 
 # Enroll a new YubiKey (vaults must be unlocked first)
+# Can enroll multiple YubiKeys for backup
 crispkey yubikey enroll
 
 # Unlock with YubiKey directly
 crispkey yubikey unlock
 
-# List enrolled credentials
+# List enrolled credentials (shows all YubiKeys)
 crispkey yubikey list
 
 # Remove enrolled credential
@@ -141,6 +154,10 @@ crispkey yubikey remove <credential_id>
 ## Sync Commands
 
 ```bash
+# Set sync authentication method
+crispkey sync auth-method password   # Use password (default)
+crispkey sync auth-method yubikey   # Require YubiKey tap during sync
+
 # Discover devices on network
 crispkey discover
 
@@ -196,9 +213,10 @@ systemctl --user start crispkey
 ├── manifest.enc              # Encrypted vault index
 ├── master_salt               # Salt for master key derivation
 ├── device_id
-├── wrapped_key               # FIDO2 credential storage
-├── wrapped_key.enc          # Encrypted master key (YubiKey path)
-└── state.json               # Paired devices, sync history
+├── wrapped_keys/             # Multiple YubiKey credentials
+│   ├── abc123...def.enc     # Each YubiKey has its own package
+│   └── xyz789...uvw.enc
+└── state.json               # Paired devices, sync history, auth settings
 ```
 
 ## Command Reference
@@ -207,8 +225,8 @@ systemctl --user start crispkey
 crispkey - GPG key synchronization with encrypted vaults
 
 Vault Commands:
-  init              Initialize vault system
-  unlock            Unlock vaults (password or YubiKey)
+  init              Initialize vault system (--yubikey for YubiKey-only)
+  unlock            Unlock vaults (YubiKey first, then password)
   lock              Lock vaults
   vault list        List vaults
   vault import <fp> Import GPG key to vault
@@ -216,20 +234,21 @@ Vault Commands:
   vault delete <fp> Delete a vault
 
 YubiKey Commands:
-  yubikey enroll      Enroll a new YubiKey
+  yubikey enroll      Enroll new YubiKey (supports multiple)
   yubikey unlock      Unlock with YubiKey
   yubikey list        List enrolled credentials
   yubikey remove <id> Remove credential
   yubikey status      Show YubiKey status
 
 Sync Commands:
+  sync auth-method <yubikey|password>  Set sync authentication method
+  sync [device]     Sync vaults with device(s)
   status            Show sync status
   keys              List GPG keys in keyring
   devices           List paired devices
   daemon            Start background sync daemon
-  discover [sec]    Find devices on network
-  pair <id|host>    Pair with a device
-  sync [device]     Sync vaults with device(s)
+  discover [sec]   Find devices on network
+  pair <id|host>   Pair with a device
 ```
 
 ## Network Ports

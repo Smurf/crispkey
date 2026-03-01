@@ -21,7 +21,9 @@ defmodule Crispkey.Vault.Manager do
           master_salt: binary() | nil,
           manifest: Manifest.t() | nil,
           unlocked: boolean(),
-          auth_method: :password | :yubikey | nil
+          auth_method: :password | :yubikey | nil,
+          auth_methods: [:password | :yubikey],
+          yubikey_only: boolean()
         }
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -133,6 +135,16 @@ defmodule Crispkey.Vault.Manager do
     GenServer.call(__MODULE__, :auth_method)
   end
 
+  @spec auth_methods() :: [:password | :yubikey]
+  def auth_methods do
+    GenServer.call(__MODULE__, :auth_methods)
+  end
+
+  @spec yubikey_only?() :: boolean()
+  def yubikey_only? do
+    GenServer.call(__MODULE__, :yubikey_only?)
+  end
+
   @spec list_yubikey_credentials() :: {:ok, [map()]} | {:error, term()}
   def list_yubikey_credentials do
     case FIDO2Client.list_enrolled() do
@@ -166,16 +178,35 @@ defmodule Crispkey.Vault.Manager do
   def init(_opts) do
     File.mkdir_p!(vaults_dir())
 
+    auth_methods = determine_auth_methods()
+    yubikey_only = LocalState.yubikey_only?()
+
     state =
       try_auto_unlock(%{
         master_key: nil,
         master_salt: nil,
         manifest: nil,
         unlocked: false,
-        auth_method: nil
+        auth_method: nil,
+        auth_methods: auth_methods,
+        yubikey_only: yubikey_only
       })
 
     {:ok, state}
+  end
+
+  @spec determine_auth_methods() :: [:password | :yubikey]
+  defp determine_auth_methods do
+    methods = []
+    methods = if master_salt_exists?(), do: [:password | methods], else: methods
+    methods = if FIDO2Client.enrolled?(), do: [:yubikey | methods], else: methods
+    methods
+  end
+
+  @spec master_salt_exists?() :: boolean()
+  defp master_salt_exists? do
+    path = Path.join(Crispkey.data_dir(), "master_salt")
+    File.exists?(path)
   end
 
   @spec try_auto_unlock(state()) :: state()
@@ -210,48 +241,90 @@ defmodule Crispkey.Vault.Manager do
 
   @impl true
   def handle_call({:unlock, password}, _from, state) do
-    if LocalState.yubikey_only?() do
-      {:reply, {:error, :yubikey_only}, state}
-    else
-      case load_master_salt() do
-        {:ok, salt} ->
-          master_key = Crypto.derive_master_key(password, salt)
+    cond do
+      state.yubikey_only ->
+        {:reply, {:error, :yubikey_only}, state}
 
-          case load_manifest_encrypted(master_key, salt) do
-            {:ok, manifest} ->
-              {:reply, :ok,
-               %{
-                 state
-                 | master_key: master_key,
-                   master_salt: salt,
-                   manifest: manifest,
-                   unlocked: true
-               }}
+      :yubikey in state.auth_methods ->
+        case do_unlock_with_yubikey() do
+          {:ok, master_key, manifest} ->
+            {:reply, :ok,
+             %{
+               state
+               | master_key: master_key,
+                 master_salt: manifest.salt,
+                 manifest: manifest,
+                 unlocked: true,
+                 auth_method: :yubikey
+             }}
 
-            {:error, _} ->
-              {:reply, {:error, :invalid_password}, state}
-          end
+          {:error, _} ->
+            unlock_with_password(password, state)
+        end
 
-        {:error, :not_initialized} ->
-          {:reply, {:error, :not_initialized}, state}
-      end
+      true ->
+        unlock_with_password(password, state)
+    end
+  end
+
+  @spec unlock_with_password(String.t(), state()) :: {:reply, term(), state()}
+  defp unlock_with_password(password, state) do
+    case load_master_salt() do
+      {:ok, salt} ->
+        master_key = Crypto.derive_master_key(password, salt)
+
+        case load_manifest_encrypted(master_key, salt) do
+          {:ok, manifest} ->
+            {:reply, :ok,
+             %{
+               state
+               | master_key: master_key,
+                 master_salt: salt,
+                 manifest: manifest,
+                 unlocked: true,
+                 auth_method: :password
+             }}
+
+          {:error, _} ->
+            {:reply, {:error, :invalid_password}, state}
+        end
+
+      {:error, :not_initialized} ->
+        {:reply, {:error, :not_initialized}, state}
     end
   end
 
   def handle_call(:lock, _from, _state) do
     {:reply, :ok,
-     %{master_key: nil, master_salt: nil, manifest: nil, unlocked: false, auth_method: nil}}
+     %{
+       master_key: nil,
+       master_salt: nil,
+       manifest: nil,
+       unlocked: false,
+       auth_method: nil,
+       auth_methods: [],
+       yubikey_only: false
+     }}
   end
 
   def handle_call(:auth_method, _from, state) do
     {:reply, state.auth_method, state}
   end
 
+  def handle_call(:auth_methods, _from, state) do
+    {:reply, state.auth_methods, state}
+  end
+
+  def handle_call(:yubikey_only?, _from, state) do
+    {:reply, state.yubikey_only, state}
+  end
+
   def handle_call({:enroll_yubikey, pin}, _from, state) do
     if state.unlocked and state.master_key do
       case do_enroll_yubikey(state.master_key, state.master_salt, pin) do
         {:ok, _wrapped_key} ->
-          {:reply, :ok, %{state | auth_method: :yubikey}}
+          auth_methods = Enum.uniq([:yubikey | state.auth_methods])
+          {:reply, :ok, %{state | auth_method: :yubikey, auth_methods: auth_methods}}
 
         error ->
           {:reply, error, state}
@@ -262,26 +335,25 @@ defmodule Crispkey.Vault.Manager do
   end
 
   def handle_call(:unlock_with_yubikey, _from, state) do
-    case load_master_salt() do
-      {:ok, salt} ->
-        case do_unlock_with_yubikey(salt) do
-          {:ok, master_key, manifest} ->
-            {:reply, :ok,
-             %{
-               state
-               | master_key: master_key,
-                 master_salt: salt,
-                 manifest: manifest,
-                 unlocked: true,
-                 auth_method: :yubikey
-             }}
+    result = do_unlock_with_yubikey()
 
-          error ->
-            {:reply, error, state}
-        end
+    case result do
+      {:ok, master_key, manifest} ->
+        {:reply, :ok,
+         %{
+           state
+           | master_key: master_key,
+             master_salt: manifest.salt,
+             manifest: manifest,
+             unlocked: true,
+             auth_method: :yubikey
+         }}
 
-      {:error, :not_initialized} ->
-        {:reply, {:error, :not_initialized}, state}
+      {:error, _} when state.yubikey_only ->
+        {:reply, {:error, :yubikey_required}, state}
+
+      {:error, _} ->
+        {:reply, {:error, :yubikey_failed}, state}
     end
   end
 
@@ -294,6 +366,7 @@ defmodule Crispkey.Vault.Manager do
     master_key = Crypto.derive_master_key(password, salt)
 
     save_master_salt!(salt)
+    LocalState.set_yubikey_only(false)
 
     manifest = %Manifest{
       vaults: %{},
@@ -306,7 +379,16 @@ defmodule Crispkey.Vault.Manager do
     save_manifest_encrypted!(manifest, master_key, salt)
 
     {:reply, :ok,
-     %{state | master_key: master_key, master_salt: salt, manifest: manifest, unlocked: true}}
+     %{
+       state
+       | master_key: master_key,
+         master_salt: salt,
+         manifest: manifest,
+         unlocked: true,
+         auth_method: :password,
+         auth_methods: [:password],
+         yubikey_only: false
+     }}
   end
 
   def handle_call({:initialize_yubikey, pin}, _from, state) do
@@ -324,6 +406,7 @@ defmodule Crispkey.Vault.Manager do
     case do_enroll_yubikey(master_key, salt, pin) do
       {:ok, _wrapped_key} ->
         save_master_salt!(salt)
+        LocalState.set_yubikey_only(true)
 
         manifest = %Manifest{
           vaults: %{},
@@ -342,7 +425,9 @@ defmodule Crispkey.Vault.Manager do
              master_salt: salt,
              manifest: manifest,
              unlocked: true,
-             auth_method: :yubikey
+             auth_method: :yubikey,
+             auth_methods: [:yubikey],
+             yubikey_only: true
          }}
 
       error ->
@@ -636,7 +721,15 @@ defmodule Crispkey.Vault.Manager do
           {:ok, assertion} ->
             case FIDO2Client.verify_assertion(assertion, challenge, wrapped_key.public_key) do
               :ok ->
-                wrapped_pkg = create_wrapped_package(master_key, dek, assertion.signature, salt)
+                wrapped_pkg =
+                  create_wrapped_package(
+                    master_key,
+                    dek,
+                    assertion.signature,
+                    salt,
+                    wrapped_key.credential_id
+                  )
+
                 save_wrapped_package!(wrapped_pkg)
                 FIDO2Client.save_enrolled(wrapped_key)
                 {:ok, wrapped_key}
@@ -654,7 +747,7 @@ defmodule Crispkey.Vault.Manager do
     end
   end
 
-  defp create_wrapped_package(master_key, dek, fido2_signature, salt) do
+  defp create_wrapped_package(master_key, dek, fido2_signature, salt, credential_id) do
     {encrypted_master_key, nonce, tag} = Crypto.wrap_master_key(master_key, dek)
     dek_key = Crypto.hkdf_derive(dek, "crispkey-fido2", 32)
     wrapped_dek = :crypto.exor(fido2_signature, dek_key)
@@ -665,13 +758,15 @@ defmodule Crispkey.Vault.Manager do
       tag: tag,
       wrapped_dek: wrapped_dek,
       salt: salt,
-      credential_id: <<>>
+      credential_id: credential_id
     }
   end
 
+  @spec save_wrapped_package!(WrappedKeyPackage.t()) :: :ok
   defp save_wrapped_package!(%WrappedKeyPackage{} = pkg) do
-    path = Path.join(Crispkey.data_dir(), "wrapped_key.enc")
-    File.mkdir_p!(Crispkey.data_dir())
+    cred_id_b64 = Base.encode64(pkg.credential_id)
+    path = Path.join([wrapped_keys_dir(), "#{cred_id_b64}.enc"])
+    File.mkdir_p!(wrapped_keys_dir())
 
     data = %{
       "encrypted_master_key" => Base.encode64(pkg.encrypted_master_key),
@@ -685,31 +780,12 @@ defmodule Crispkey.Vault.Manager do
     File.write!(path, Jason.encode!(data))
   end
 
-  @spec do_unlock_with_yubikey(binary()) :: {:ok, binary(), Manifest.t()} | {:error, term()}
-  defp do_unlock_with_yubikey(salt) do
-    with {:ok, wrapped_key} <- FIDO2Client.get_wrapped_key(),
-         {:ok, pkg} <- load_wrapped_package(),
-         {:ok, _assertion} <- FIDO2Client.authenticate(wrapped_key, pkg.encrypted_master_key) do
-      case Crypto.unwrap_with_fido2(
-             %{
-               encrypted_master_key: pkg.encrypted_master_key,
-               nonce: pkg.nonce,
-               tag: pkg.tag,
-               wrapped_dek: pkg.wrapped_dek
-             },
-             pkg.wrapped_dek,
-             wrapped_key.public_key
-           ) do
-        {:ok, master_key} ->
-          case load_manifest_encrypted(master_key, salt) do
-            {:ok, manifest} -> {:ok, master_key, manifest}
-            error -> error
-          end
+  @spec wrapped_keys_dir() :: String.t()
+  defp do_unlock_with_yubikey do
+    case FIDO2Client.get_wrapped_keys() do
+      {:ok, wrapped_keys} ->
+        try_unlock_with_keys(wrapped_keys)
 
-        error ->
-          error
-      end
-    else
       {:error, :not_enrolled} ->
         {:error, :not_enrolled}
 
@@ -718,8 +794,83 @@ defmodule Crispkey.Vault.Manager do
     end
   end
 
-  @spec load_wrapped_package() :: {:ok, WrappedKeyPackage.t()} | {:error, :not_found}
-  defp load_wrapped_package do
+  @spec try_unlock_with_keys([FIDO2Types.WrappedKey.t()]) ::
+          {:ok, binary(), Manifest.t()} | {:error, term()}
+  defp try_unlock_with_keys([]) do
+    {:error, :no_keys}
+  end
+
+  defp try_unlock_with_keys([wrapped_key | rest]) do
+    case load_wrapped_package(wrapped_key.credential_id) do
+      {:ok, pkg} ->
+        case FIDO2Client.authenticate(wrapped_key, pkg.encrypted_master_key) do
+          {:ok, _assertion} ->
+            case Crypto.unwrap_with_fido2(
+                   %{
+                     encrypted_master_key: pkg.encrypted_master_key,
+                     nonce: pkg.nonce,
+                     tag: pkg.tag,
+                     wrapped_dek: pkg.wrapped_dek
+                   },
+                   pkg.wrapped_dek,
+                   wrapped_key.public_key
+                 ) do
+              {:ok, master_key} ->
+                salt = pkg.salt
+
+                case load_manifest_encrypted(master_key, salt) do
+                  {:ok, manifest} -> {:ok, master_key, manifest}
+                  error -> error
+                end
+
+              error ->
+                try_unlock_with_keys(rest)
+            end
+
+          _ ->
+            try_unlock_with_keys(rest)
+        end
+
+      {:error, _} ->
+        try_unlock_with_keys(rest)
+    end
+  end
+
+  @spec wrapped_keys_dir() :: String.t()
+  defp wrapped_keys_dir do
+    Path.join(Crispkey.data_dir(), "wrapped_keys")
+  end
+
+  @spec load_wrapped_package(binary()) :: {:ok, WrappedKeyPackage.t()} | {:error, :not_found}
+  defp load_wrapped_package(credential_id) do
+    cred_id_b64 = Base.encode64(credential_id)
+    path = Path.join([wrapped_keys_dir(), "#{cred_id_b64}.enc"])
+
+    case File.read(path) do
+      {:ok, data} ->
+        {:ok, json} = Jason.decode(data)
+
+        {:ok,
+         %WrappedKeyPackage{
+           encrypted_master_key: Base.decode64!(json["encrypted_master_key"]),
+           nonce: Base.decode64!(json["nonce"]),
+           tag: Base.decode64!(json["tag"]),
+           wrapped_dek: Base.decode64!(json["wrapped_dek"]),
+           salt: Base.decode64!(json["salt"]),
+           credential_id: Base.decode64!(json["credential_id"])
+         }}
+
+      {:error, :enoent} ->
+        load_wrapped_package_legacy(credential_id)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @spec load_wrapped_package_legacy(binary()) ::
+          {:ok, WrappedKeyPackage.t()} | {:error, :not_found}
+  defp load_wrapped_package_legacy(_credential_id) do
     path = Path.join(Crispkey.data_dir(), "wrapped_key.enc")
 
     case File.read(path) do

@@ -197,22 +197,31 @@ Typed message structs for wire protocol:
 
 ```bash
 # Vault management
-crispkey init              # Initialize vault system
-crispkey unlock            # Unlock vaults with master password
-crispkey lock              # Clear master key from memory
-crispkey vault list        # List vaults
-crispkey vault import <fp> # Import GPG key to vault
-crispkey vault export <fp> # Export vault to GPG keyring
-crispkey vault delete <fp> # Delete a vault
+crispkey init                  # Initialize with password
+crispkey init --yubikey       # Initialize with YubiKey only
+crispkey unlock                # Unlock (hybrid: YubiKey first, then password)
+crispkey lock                  # Clear master key from memory
+crispkey vault list            # List vaults
+crispkey vault import <fp>    # Import GPG key to vault
+crispkey vault export <fp>    # Export vault to GPG keyring
+crispkey vault delete <fp>    # Delete a vault
 
-# Sync
-crispkey status            # Show sync status
-crispkey keys              # List GPG keys in keyring
-crispkey devices           # List paired devices
-crispkey daemon            # Start background sync daemon
-crispkey discover [sec]    # Find devices on network
-crispkey pair <id|host>    # Pair with a device
-crispkey sync [device]     # Sync vaults with device(s)
+# YubiKey management
+crispkey yubikey status       # Check YubiKey availability
+crispkey yubikey enroll       # Add new YubiKey (supports multiple)
+crispkey yubikey unlock       # Unlock with YubiKey
+crispkey yubikey list         # List enrolled credentials
+crispkey yubikey remove <id>  # Remove credential
+
+# Sync management
+crispkey sync auth-method <yubikey|password>  # Set sync authentication
+crispkey status               # Show sync status
+crispkey keys                 # List GPG keys in keyring
+crispkey devices              # List paired devices
+crispkey daemon               # Start background sync daemon
+crispkey discover [sec]       # Find devices on network
+crispkey pair <id|host>       # Pair with a device
+crispkey sync [device]        # Sync vaults with device(s)
 ```
 
 ### Environment Variables
@@ -223,6 +232,59 @@ crispkey sync [device]     # Sync vaults with device(s)
 
 ## Sync Flow
 
+### Password-based Sync (default)
+
+```
+Client (Bob)                              Server (Alice)
+    │                                          │
+    │──── HELLO(device_id, session_id) ──────►│
+    │◄─── HELLO(device_id, session_id) ───────│
+    │                                          │
+    │  [Both derive session_key from           │
+    │   sync_password_hash + session_id]       │
+    │                                          │
+    │──── AUTH_TOKEN(hmac) [encrypted] ──────►│
+    │◄─── AUTH_OK [encrypted] ────────────────│
+    │                                          │
+    │──── MANIFEST_REQUEST [encrypted] ──────►│
+    │◄─── MANIFEST(data) [encrypted] ─────────│
+    │                                          │
+    │  [Compare manifests, find needed vaults] │
+    │                                          │
+    │──── VAULT_REQUEST(fps) [encrypted] ────►│
+    │◄─── VAULT_DATA(fp, encrypted_blob) ─────│
+    │◄─── VAULT_DATA(fp, encrypted_blob) ─────│
+    │◄─── ACK [encrypted] ────────────────────│
+    │                                          │
+    │  [Store vaults, no decryption needed]    │
+    │                                          │
+    │──── GOODBYE [encrypted] ────────────────►│
+```
+
+### YubiKey-based Sync (optional)
+
+When `sync_auth_method` is set to `:yubikey`:
+
+```
+Client (Bob)                              Server (Alice)
+    │                                          │
+    │──── HELLO(device_id, session_id) ──────►│
+    │◄─── HELLO(device_id, session_id) ───────│
+    │                                          │
+    │──── AUTH_TOKEN(hmac) [encrypted] ──────►│
+    │◄─── AUTH_YUBIKEY_CHALLENGE [enc] ──────│
+    │                                          │
+    │  [Bob taps YubiKey to sign challenge]    │
+    │                                          │
+    │──── AUTH_YUBIKEY_RESPONSE [enc] ───────►│
+    │◄─── AUTH_YUBIKEY_CHALLENGEE [enc] ──────│
+    │                                          │
+    │  [Alice taps YubiKey to sign challenge]  │
+    │                                          │
+    │──── AUTH_YUBIKEY_RESPONSE [enc] ───────►│
+    │◄─── AUTH_OK [encrypted] ────────────────│
+    │                                          │
+    │  [Both verified, sync proceeds...]       │
 ```
 Client (Bob)                              Server (Alice)
     │                                          │
@@ -305,6 +367,9 @@ Encrypted messages (after HELLO):
 | One vault compromised | Others use different HKDF-derived keys |
 | Replay attack | Counter-based nonces, session IDs |
 | Atom table exhaustion | Explicit atom conversion in message decoding |
+| Password brute force | YubiKey path requires physical device |
+| YubiKey lost | Multiple YubiKeys can be enrolled for backup |
+| YubiKey-only vault theft | No password fallback, requires physical key |
 
 ## Configuration
 
@@ -353,7 +418,7 @@ The Merge.Engine module handles conflict detection:
 
 ## FIDO2/YubiKey Authentication
 
-Crispkey supports hardware key authentication using FIDO2/YubiKey devices. This provides an alternative to password-based vault unlocking.
+Crispkey supports hardware key authentication using FIDO2/YubiKey devices. This provides an alternative to password-based vault unlocking, with support for multiple backup keys.
 
 ### Architecture
 
@@ -361,17 +426,66 @@ Crispkey supports hardware key authentication using FIDO2/YubiKey devices. This 
 ┌─────────────────────────────────────────────────────────────────┐
 │              YubiKey/FIDO2 Authentication Flow                    │
 ├─────────────────────────────────────────────────────────────────┤
-│  Enrollment:                                                    │
+│  Enrollment (can add multiple YubiKeys):                         │
 │  1. Generate random Data Encryption Key (DEK)                   │
 │  2. Create FIDO2 credential on YubiKey                          │
 │  3. Wrap (encrypt) DEK using FIDO2 signature                    │
-│  4. Store wrapped package + public key                          │
+│  4. Store wrapped package in wrapped_keys/<cred_id>.enc         │
 │                                                                  │
-│  Unlock:                                                         │
-│  1. Generate FIDO2 assertion (PIN + touch)                      │
-│  2. Use assertion to unwrap DEK                                  │
-│  3. Use DEK to decrypt master key                               │
-│  4. Master key decrypts manifest and vaults                     │
+│  Unlock (hybrid - tries each enrolled key):                      │
+│  1. Iterate through all enrolled YubiKeys                       │
+│  2. For each: generate FIDO2 assertion (PIN + touch)           │
+│  3. Use assertion to unwrap DEK                                  │
+│  4. Use DEK to decrypt master key                                │
+│  5. First successful unlock wins                                 │
+│                                                                  │
+│  YubiKey-only mode:                                              │
+│  - Initialize with init --yubikey                                │
+│  - Sets yubikey_only = true in state                            │
+│  - Password unlock rejected with :yubikey_only error            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Hybrid Unlock Flow
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Unlock Flow                                    │
+├─────────────────────────────────────────────────────────────────┤
+│  unlock(password):                                               │
+│  1. If yubikey_only == true → return error                     │
+│  2. If YubiKey enrolled:                                        │
+│     a. Try unlock_with_yubikey()                                │
+│     b. If success → unlock vaults                               │
+│     c. If fails → try password                                  │
+│  3. If no YubiKey → try password                                │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Sync Authentication
+
+Crispkey supports YubiKey-based sync authentication as an alternative to password-only sync:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              YubiKey Sync Authentication                          │
+├─────────────────────────────────────────────────────────────────┤
+│  Set auth method:                                                │
+│  crispkey sync auth-method yubikey   # Require YubiKey tap     │
+│  crispkey sync auth-method password  # Password only (default)  │
+│                                                                  │
+│  Sync flow with YubiKey auth:                                   │
+│  1. Client sends AUTH_TOKEN (password-based)                    │
+│  2. Server verifies, then sends AUTH_YUBIKEY_CHALLENGE          │
+│  3. Client taps YubiKey, sends AUTH_YUBIKEY_RESPONSE            │
+│  4. Server verifies signature                                   │
+│  5. Server sends its own AUTH_YUBIKEY_CHALLENGE                │
+│  6. Client taps YubiKey, sends response                        │
+│  7. Both sides verified → sync proceeds                        │
+│                                                                  │
+│  Mixed mode:                                                    │
+│  - Works regardless of whether remote uses YubiKey for vault    │
+│  - Only sync_auth_method setting matters                        │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -379,20 +493,25 @@ Crispkey supports hardware key authentication using FIDO2/YubiKey devices. This 
 
 - `lib/crispkey/fido2/types.ex` - FIDO2 type definitions
 - `lib/crispkey/fido2/bindings.ex` - libfido2 command-line tool wrappers
-- `lib/crispkey/fido2/client.ex` - High-level FIDO2 API
+- `lib/crispkey/fido2/client.ex` - High-level FIDO2 API (supports multiple keys)
+- `lib/crispkey/vault/manager.ex` - Vault unlock with hybrid YubiKey/password
+- `lib/crispkey/store/local_state.ex` - sync_auth_method, yubikey_only settings
 
 ### Storage
 
 ```
 ~/.config/crispkey/
-├── wrapped_key              # FIDO2 credential storage
-└── wrapped_key.enc         # Encrypted master key package
+├── wrapped_keys/              # Multiple YubiKey packages
+│   ├── abc123...def.enc      # Each credential stored separately
+│   └── xyz789...uvw.enc
+└── state.json                # Includes sync_auth_method, yubikey_only
 ```
 
 ### Requirements
 
 - libfido2 installed (`fido2-tools` on Linux, `libfido2` on macOS)
 - FIDO2/YubiKey 5 series or other CTAP2-compatible device
+- Multiple YubiKeys can be enrolled for backup purposes
 
 ### CLI Commands
 
@@ -401,6 +520,7 @@ Crispkey supports hardware key authentication using FIDO2/YubiKey devices. This 
 crispkey yubikey status
 
 # Enroll a new YubiKey (vaults must be unlocked first)
+# Can enroll multiple keys - each will work for unlock
 crispkey yubikey enroll
 
 # Unlock with YubiKey
@@ -409,7 +529,7 @@ crispkey yubikey unlock
 # Or just use unlock and press Enter for YubiKey
 crispkey unlock
 
-# List enrolled credentials
+# List enrolled credentials (shows all YubiKeys)
 crispkey yubikey list
 
 # Remove enrolled credential
@@ -423,6 +543,8 @@ crispkey yubikey remove <credential_id>
 | Password compromised | YubiKey still protects vaults |
 | YubiKey stolen | Requires PIN + physical touch |
 | Device cloned | YubiKey private keys cannot be extracted |
+| YubiKey lost | Multiple YubiKeys can be enrolled for backup |
+| YubiKey-only vault | No password fallback - physical key required |
 
 ## Migration from v1
 

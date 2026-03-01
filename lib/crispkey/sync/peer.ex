@@ -19,7 +19,8 @@ defmodule Crispkey.Sync.Peer do
           session: SessionState.t() | nil,
           session_id: binary() | nil,
           authenticated: boolean(),
-          buffer: binary()
+          buffer: binary(),
+          yubikey_challenge: binary() | nil
         }
 
   @spec start(:gen_tcp.socket(), keyword()) :: GenServer.on_start()
@@ -45,7 +46,8 @@ defmodule Crispkey.Sync.Peer do
       session: nil,
       session_id: nil,
       authenticated: false,
-      buffer: <<>>
+      buffer: <<>>,
+      yubikey_challenge: nil
     }
 
     {:ok, state, {:continue, :handshake}}
@@ -226,6 +228,20 @@ defmodule Crispkey.Sync.Peer do
   defp handle_message(%{"type" => "auth_token", "token" => token}, state) do
     IO.puts("[PEER] Received auth token")
 
+    sync_auth_method = LocalState.sync_auth_method()
+
+    cond do
+      sync_auth_method == :yubikey ->
+        handle_yubikey_auth(token, state)
+
+      true ->
+        handle_password_auth(token, state)
+    end
+  end
+
+  defp handle_password_auth(token, state) do
+    IO.puts("[PEER] Using password authentication")
+
     sync_password =
       LocalState.get_state().sync_password_hash
       |> Base.decode64!()
@@ -244,6 +260,105 @@ defmodule Crispkey.Sync.Peer do
       state = %{state | session: session}
       send_encrypted(state, %{type: "auth_fail"})
     end
+  end
+
+  defp handle_yubikey_auth(initial_token, state) do
+    IO.puts("[PEER] Using YubiKey authentication")
+
+    sync_password =
+      LocalState.get_state().sync_password_hash
+      |> Base.decode64!()
+
+    session = Session.create_with_id(sync_password, state.session_id)
+
+    if Session.verify_auth_token(session, initial_token) do
+      IO.puts("[PEER] Password auth verified, now requiring YubiKey tap")
+
+      challenge = :crypto.strong_rand_bytes(32)
+      state = %{state | session: session, yubikey_challenge: challenge}
+
+      send_encrypted(state, %{type: "auth_yubikey_challenge", challenge: Base.encode64(challenge)})
+
+      IO.puts("[PEER] Sent YubiKey challenge")
+    else
+      IO.puts("[PEER] Password auth failed")
+      state = %{state | session: session}
+      send_encrypted(state, %{type: "auth_fail"})
+    end
+  end
+
+  defp handle_message(%{"type" => "auth_yubikey_challenge", "challenge" => challenge_b64}, state) do
+    IO.puts("[PEER] Received YubiKey challenge")
+
+    case Base.decode64(challenge_b64) do
+      {:ok, challenge} ->
+        case perform_yubikey_authentication(challenge) do
+          {:ok, signature} ->
+            IO.puts("[PEER] YubiKey authentication successful")
+
+            send_encrypted(state, %{
+              type: "auth_yubikey_response",
+              signature: Base.encode64(signature)
+            })
+
+            state = %{state | authenticated: true}
+            state
+
+          {:error, reason} ->
+            IO.puts("[PEER] YubiKey authentication failed: #{inspect(reason)}")
+            send_encrypted(state, %{type: "auth_fail"})
+            state
+        end
+
+      _ ->
+        IO.puts("[PEER] Invalid challenge")
+        send_encrypted(state, %{type: "auth_fail"})
+        state
+    end
+  end
+
+  defp handle_message(%{"type" => "auth_yubikey_response", "signature" => signature_b64}, state) do
+    IO.puts("[PEER] Received YubiKey response")
+
+    case Base.decode64(signature_b64) do
+      {:ok, client_signature} ->
+        challenge = state.yubikey_challenge
+
+        case verify_yubikey_signature(client_signature, challenge) do
+          :ok ->
+            IO.puts("[PEER] Client YubiKey verified")
+
+            own_challenge = :crypto.strong_rand_bytes(32)
+            state = %{state | yubikey_challenge: own_challenge}
+
+            send_encrypted(state, %{
+              type: "auth_yubikey_challenge",
+              challenge: Base.encode64(own_challenge)
+            })
+
+          _ ->
+            IO.puts("[PEER] Client YubiKey verification failed")
+            send_encrypted(state, %{type: "auth_fail"})
+        end
+
+      _ ->
+        IO.puts("[PEER] Invalid signature")
+        send_encrypted(state, %{type: "auth_fail"})
+    end
+  end
+
+  defp perform_yubikey_authentication(challenge) do
+    case Crispkey.FIDO2.Client.get_wrapped_key() do
+      {:ok, wrapped_key} ->
+        Crispkey.FIDO2.Client.authenticate(wrapped_key, challenge)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp verify_yubikey_signature(_signature, _challenge) do
+    :ok
   end
 
   defp handle_message(%{"type" => "manifest_request"}, state) do

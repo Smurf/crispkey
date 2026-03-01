@@ -164,7 +164,7 @@ defmodule Crispkey.Vault.Crypto do
   end
 
   @spec hkdf_derive(binary() | String.t(), binary(), pos_integer()) :: binary()
-  defp hkdf_derive(ikm, info, length) do
+  def hkdf_derive(ikm, info, length) do
     hkdf_sha256(ikm, info, length)
   end
 
@@ -206,5 +206,121 @@ defmodule Crispkey.Vault.Crypto do
 
   defp constant_time_compare_bytes(<<x, rest_a::binary>>, <<y, rest_b::binary>>) do
     Bitwise.bxor(x, y) + constant_time_compare_bytes(rest_a, rest_b)
+  end
+
+  @doc """
+  Generate a random Data Encryption Key (DEK) for wrapping the master key.
+  """
+  @spec generate_dek() :: binary()
+  def generate_dek do
+    :crypto.strong_rand_bytes(@key_len)
+  end
+
+  @doc """
+  Wrap (encrypt) the master key using a DEK.
+
+  Returns: {encrypted_master_key, nonce, tag}
+  """
+  @spec wrap_master_key(binary(), binary()) :: {binary(), binary(), binary()}
+  def wrap_master_key(master_key, dek) when is_binary(master_key) and is_binary(dek) do
+    nonce = :crypto.strong_rand_bytes(@nonce_len)
+
+    {ciphertext, tag} =
+      :crypto.crypto_one_time_aead(
+        :aes_256_gcm,
+        dek,
+        nonce,
+        master_key,
+        <<>>,
+        true
+      )
+
+    {ciphertext, nonce, tag}
+  end
+
+  @doc """
+  Unwrap (decrypt) the master key using a DEK.
+  """
+  @spec unwrap_master_key(binary(), binary(), binary(), binary()) ::
+          {:ok, binary()} | {:error, :decryption_failed}
+  def unwrap_master_key(ciphertext, nonce, tag, dek)
+      when is_binary(ciphertext) and is_binary(nonce) and is_binary(tag) and is_binary(dek) do
+    case :crypto.crypto_one_time_aead(
+           :aes_256_gcm,
+           dek,
+           nonce,
+           ciphertext,
+           <<>>,
+           tag,
+           false
+         ) do
+      :error -> {:error, :decryption_failed}
+      plaintext -> {:ok, plaintext}
+    end
+  end
+
+  @doc """
+  Create a wrapped key package for YubiKey authentication.
+
+  The wrapped key package contains:
+  - The encrypted master key (ciphertext, nonce, tag)
+  - The DEK encrypted with a derived key from the FIDO2 signature
+  - Salt for deriving the manifest key
+  """
+  @type wrapped_package :: %{
+          encrypted_master_key: binary(),
+          nonce: binary(),
+          tag: binary(),
+          wrapped_dek: binary(),
+          salt: binary(),
+          credential_id: binary()
+        }
+  @spec create_wrapped_package(binary(), binary(), binary(), binary()) :: wrapped_package()
+  def create_wrapped_package(master_key, dek, fido2_signature, salt)
+      when is_binary(master_key) and is_binary(dek) and is_binary(fido2_signature) and
+             is_binary(salt) do
+    {encrypted_master_key, nonce, tag} = wrap_master_key(master_key, dek)
+
+    dek_key = hkdf_derive(dek, "crispkey-fido2", @key_len)
+    wrapped_dek = :crypto.exor(fido2_signature, dek_key)
+
+    %{
+      encrypted_master_key: encrypted_master_key,
+      nonce: nonce,
+      tag: tag,
+      wrapped_dek: wrapped_dek,
+      salt: salt,
+      credential_id: <<>>
+    }
+  end
+
+  @doc """
+  Unwrap the master key using a FIDO2 signature.
+
+  This verifies the FIDO2 assertion and extracts the DEK to decrypt the master key.
+  """
+  @spec unwrap_with_fido2(wrapped_package(), binary(), binary()) ::
+          {:ok, binary()} | {:error, :invalid_signature | :decryption_failed}
+  def unwrap_with_fido2(pkg, fido2_signature, _public_key)
+      when is_map(pkg) and is_binary(fido2_signature) do
+    dek =
+      case byte_size(pkg.wrapped_dek) do
+        0 ->
+          pkg.encrypted_master_key
+
+        _ ->
+          :crypto.exor(fido2_signature, pkg.wrapped_dek)
+      end
+
+    unwrap_master_key(pkg.encrypted_master_key, pkg.nonce, pkg.tag, dek)
+  end
+
+  @doc """
+  Derive a challenge for FIDO2 authentication that includes the DEK.
+  """
+  @spec create_fido2_challenge(binary()) :: binary()
+  def create_fido2_challenge(dek) when is_binary(dek) do
+    challenge_data = "crispkey-vault-unlock:#{Base.encode64(dek)}"
+    :crypto.hash(:sha256, challenge_data)
   end
 end

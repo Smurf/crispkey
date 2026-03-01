@@ -10,11 +10,22 @@ GPG key synchronization across devices using encrypted vaults and peer-to-peer s
 
 - **Encrypted Vaults**: Keys stored in individually encrypted vault files
 - **Separate Passwords**: Master password for vaults, sync password for authentication
+- **Hardware Key Support**: Unlock vaults with YubiKey or FIDO2 device
 - **Encrypted Transport**: All sync communication encrypted with session keys
 - **P2P Discovery**: Find other devices on your local network via UDP multicast
 - **Incremental Sync**: Only transfer changed vaults
 
 ## Installation
+
+### Prerequisites
+
+#### For Password-based Authentication
+- Elixir/Erlang
+
+#### For YubiKey/FIDO2 Authentication
+- **Linuxsudo apt install f**: `ido2-tools` or `sudo dnf install fido2-tools`
+- **macOS**: `brew install libfido2`
+- A FIDO2/YubiKey 5 series device
 
 ### From Source
 
@@ -49,20 +60,26 @@ mix escript.build
 ## Security Model
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Master Password → PBKDF2(600k iter) → Master Key           │
-│                         │                                   │
-│                         ▼                                   │
-│              Vault Key (per vault via HKDF)                 │
-│                         │                                   │
-│                         ▼                                   │
-│              AES-256-GCM Encrypted Vault                    │
-├─────────────────────────────────────────────────────────────┤
-│  Sync Password → HKDF(session_id) → Session Key             │
-│                         │                                   │
-│                         ▼                                   │
-│              AES-256-GCM Encrypted Transport                │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│  Master Password → PBKDF2(600k iter) → Master Key              │
+│                         │                                       │
+│                         ▼                                       │
+│              Vault Key (per vault via HKDF)                     │
+│                         │                                       │
+│                         ▼                                       │
+│              AES-256-GCM Encrypted Vault                         │
+├─────────────────────────────────────────────────────────────────┤
+│  YubiKey Path (optional):                                       │
+│  1. Generate random DEK                                         │
+│  2. Wrap master key with DEK                                     │
+│  3. Store DEK wrapped by FIDO2 credential                       │
+│  4. Unlock requires PIN + touch                                  │
+├─────────────────────────────────────────────────────────────────┤
+│  Sync Password → HKDF(session_id) → Session Key                 │
+│                         │                                       │
+│                         ▼                                       │
+│              AES-256-GCM Encrypted Transport                    │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 **Key Benefits:**
@@ -79,6 +96,13 @@ crispkey init
 # Unlock vaults with master password
 crispkey unlock
 
+# Unlock vaults with YubiKey (if enrolled)
+crispkey unlock
+# Press Enter when prompted to use YubiKey
+
+# Or directly:
+crispkey yubikey unlock
+
 # Lock vaults (clear master key from memory)
 crispkey lock
 
@@ -93,6 +117,25 @@ crispkey vault export <fingerprint>
 
 # Delete a vault
 crispkey vault delete <fingerprint>
+```
+
+## YubiKey Commands
+
+```bash
+# Check YubiKey/FIDO2 status
+crispkey yubikey status
+
+# Enroll a new YubiKey (vaults must be unlocked first)
+crispkey yubikey enroll
+
+# Unlock with YubiKey directly
+crispkey yubikey unlock
+
+# List enrolled credentials
+crispkey yubikey list
+
+# Remove enrolled credential
+crispkey yubikey remove <credential_id>
 ```
 
 ## Sync Commands
@@ -153,7 +196,9 @@ systemctl --user start crispkey
 ├── manifest.enc              # Encrypted vault index
 ├── master_salt               # Salt for master key derivation
 ├── device_id
-└── state.json                # Paired devices, sync history
+├── wrapped_key               # FIDO2 credential storage
+├── wrapped_key.enc          # Encrypted master key (YubiKey path)
+└── state.json               # Paired devices, sync history
 ```
 
 ## Command Reference
@@ -163,12 +208,19 @@ crispkey - GPG key synchronization with encrypted vaults
 
 Vault Commands:
   init              Initialize vault system
-  unlock            Unlock vaults with master password
+  unlock            Unlock vaults (password or YubiKey)
   lock              Lock vaults
   vault list        List vaults
   vault import <fp> Import GPG key to vault
   vault export <fp> Export vault to GPG keyring
   vault delete <fp> Delete a vault
+
+YubiKey Commands:
+  yubikey enroll      Enroll a new YubiKey
+  yubikey unlock      Unlock with YubiKey
+  yubikey list        List enrolled credentials
+  yubikey remove <id> Remove credential
+  yubikey status      Show YubiKey status
 
 Sync Commands:
   status            Show sync status
@@ -196,6 +248,7 @@ Sync Commands:
 | Sync password compromised | Can sync, but can't read vaults |
 | Master password compromised | Can read vaults, but can't impersonate for sync |
 | One vault compromised | Others use different HKDF-derived keys |
+| Password brute force | YubiKey path requires physical device |
 
 ## Troubleshooting
 

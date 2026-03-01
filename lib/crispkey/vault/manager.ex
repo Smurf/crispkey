@@ -4,18 +4,23 @@ defmodule Crispkey.Vault.Manager do
 
   The manager caches the master key in memory for the session duration.
   All vault operations require the master key to be unlocked first.
+
+  Supports YubiKey/FIDO2 authentication in addition to password.
   """
 
   use GenServer
 
+  alias Crispkey.FIDO2.Client, as: FIDO2Client
+  alias Crispkey.FIDO2.Types, as: FIDO2Types
   alias Crispkey.Vault.{Crypto, ManifestModule, Types}
-  alias Types.{Manifest, Vault, VaultEntry}
+  alias Types.{Manifest, Vault, VaultEntry, WrappedKeyPackage}
 
   @type state :: %{
           master_key: binary() | nil,
           master_salt: binary() | nil,
           manifest: Manifest.t() | nil,
-          unlocked: boolean()
+          unlocked: boolean(),
+          auth_method: :password | :yubikey | nil
         }
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -95,6 +100,55 @@ defmodule Crispkey.Vault.Manager do
     GenServer.call(__MODULE__, :get_manifest)
   end
 
+  @spec yubikey_available?() :: boolean()
+  def yubikey_available? do
+    FIDO2Client.device_available?()
+  end
+
+  @spec yubikey_enrolled?() :: boolean()
+  def yubikey_enrolled? do
+    FIDO2Client.enrolled?()
+  end
+
+  @spec enroll_yubikey(String.t()) :: :ok | {:error, :not_available | :enrollment_failed | term()}
+  def enroll_yubikey(password) do
+    GenServer.call(__MODULE__, {:enroll_yubikey, password})
+  end
+
+  @spec unlock_with_yubikey() ::
+          :ok | {:error, :not_enrolled | :user_not_present | :verification_failed | term()}
+  def unlock_with_yubikey do
+    GenServer.call(__MODULE__, :unlock_with_yubikey)
+  end
+
+  @spec auth_method() :: :password | :yubikey | nil
+  def auth_method do
+    GenServer.call(__MODULE__, :auth_method)
+  end
+
+  @spec list_yubikey_credentials() :: {:ok, [map()]} | {:error, term()}
+  def list_yubikey_credentials do
+    case FIDO2Client.list_enrolled() do
+      {:ok, keys} ->
+        {:ok,
+         Enum.map(keys, fn key ->
+           %{
+             credential_id: Base.encode64(key.credential_id),
+             rp_id: key.rp_id
+           }
+         end)}
+
+      error ->
+        error
+    end
+  end
+
+  @spec remove_yubikey_credential(credential_id :: String.t()) :: :ok | {:error, term()}
+  def remove_yubikey_credential(credential_id) do
+    cred_id = Base.decode64!(credential_id)
+    FIDO2Client.remove_enrolled(cred_id)
+  end
+
   @spec vaults_dir() :: String.t()
   def vaults_dir do
     Path.join(Crispkey.data_dir(), "vaults")
@@ -105,7 +159,14 @@ defmodule Crispkey.Vault.Manager do
   def init(_opts) do
     File.mkdir_p!(vaults_dir())
 
-    state = try_auto_unlock(%{master_key: nil, master_salt: nil, manifest: nil, unlocked: false})
+    state =
+      try_auto_unlock(%{
+        master_key: nil,
+        master_salt: nil,
+        manifest: nil,
+        unlocked: false,
+        auth_method: nil
+      })
 
     {:ok, state}
   end
@@ -167,7 +228,50 @@ defmodule Crispkey.Vault.Manager do
   end
 
   def handle_call(:lock, _from, _state) do
-    {:reply, :ok, %{master_key: nil, master_salt: nil, manifest: nil, unlocked: false}}
+    {:reply, :ok,
+     %{master_key: nil, master_salt: nil, manifest: nil, unlocked: false, auth_method: nil}}
+  end
+
+  def handle_call(:auth_method, _from, state) do
+    {:reply, state.auth_method, state}
+  end
+
+  def handle_call({:enroll_yubikey, _password}, _from, state) do
+    if state.unlocked and state.master_key do
+      case do_enroll_yubikey(state.master_key, state.master_salt) do
+        {:ok, _wrapped_key} ->
+          {:reply, :ok, %{state | auth_method: :yubikey}}
+
+        error ->
+          {:reply, error, state}
+      end
+    else
+      {:reply, {:error, :locked}, state}
+    end
+  end
+
+  def handle_call(:unlock_with_yubikey, _from, state) do
+    case load_master_salt() do
+      {:ok, salt} ->
+        case do_unlock_with_yubikey(salt) do
+          {:ok, master_key, manifest} ->
+            {:reply, :ok,
+             %{
+               state
+               | master_key: master_key,
+                 master_salt: salt,
+                 manifest: manifest,
+                 unlocked: true,
+                 auth_method: :yubikey
+             }}
+
+          error ->
+            {:reply, error, state}
+        end
+
+      {:error, :not_initialized} ->
+        {:reply, {:error, :not_initialized}, state}
+    end
   end
 
   def handle_call(:unlocked?, _from, state) do
@@ -466,5 +570,125 @@ defmodule Crispkey.Vault.Manager do
     json = ManifestModule.to_json(manifest)
     encrypted = Crypto.encrypt_vault(json, manifest_key)
     :ok = File.write(path, encrypted)
+  end
+
+  @spec do_enroll_yubikey(binary(), binary()) ::
+          {:ok, FIDO2Types.WrappedKey.t()} | {:error, term()}
+  defp do_enroll_yubikey(master_key, salt) do
+    case FIDO2Client.enroll() do
+      {:ok, wrapped_key} ->
+        dek = Crypto.generate_dek()
+        challenge = Crypto.create_fido2_challenge(dek)
+
+        case FIDO2Client.authenticate(wrapped_key, challenge) do
+          {:ok, assertion} ->
+            case FIDO2Client.verify_assertion(assertion, challenge, wrapped_key.public_key) do
+              :ok ->
+                wrapped_pkg = create_wrapped_package(master_key, dek, assertion.signature, salt)
+                save_wrapped_package!(wrapped_pkg)
+                FIDO2Client.save_enrolled(wrapped_key)
+                {:ok, wrapped_key}
+
+              error ->
+                error
+            end
+
+          error ->
+            error
+        end
+
+      error ->
+        error
+    end
+  end
+
+  defp create_wrapped_package(master_key, dek, fido2_signature, salt) do
+    {encrypted_master_key, nonce, tag} = Crypto.wrap_master_key(master_key, dek)
+    dek_key = Crypto.hkdf_derive(dek, "crispkey-fido2", 32)
+    wrapped_dek = :crypto.exor(fido2_signature, dek_key)
+
+    %WrappedKeyPackage{
+      encrypted_master_key: encrypted_master_key,
+      nonce: nonce,
+      tag: tag,
+      wrapped_dek: wrapped_dek,
+      salt: salt,
+      credential_id: <<>>
+    }
+  end
+
+  defp save_wrapped_package!(%WrappedKeyPackage{} = pkg) do
+    path = Path.join(Crispkey.data_dir(), "wrapped_key.enc")
+    File.mkdir_p!(Crispkey.data_dir())
+
+    data = %{
+      "encrypted_master_key" => Base.encode64(pkg.encrypted_master_key),
+      "nonce" => Base.encode64(pkg.nonce),
+      "tag" => Base.encode64(pkg.tag),
+      "wrapped_dek" => Base.encode64(pkg.wrapped_dek),
+      "salt" => Base.encode64(pkg.salt),
+      "credential_id" => Base.encode64(pkg.credential_id)
+    }
+
+    File.write!(path, Jason.encode!(data))
+  end
+
+  @spec do_unlock_with_yubikey(binary()) :: {:ok, binary(), Manifest.t()} | {:error, term()}
+  defp do_unlock_with_yubikey(salt) do
+    with {:ok, wrapped_key} <- FIDO2Client.get_wrapped_key(),
+         {:ok, pkg} <- load_wrapped_package(),
+         {:ok, _assertion} <- FIDO2Client.authenticate(wrapped_key, pkg.encrypted_master_key) do
+      case Crypto.unwrap_with_fido2(
+             %{
+               encrypted_master_key: pkg.encrypted_master_key,
+               nonce: pkg.nonce,
+               tag: pkg.tag,
+               wrapped_dek: pkg.wrapped_dek
+             },
+             pkg.wrapped_dek,
+             wrapped_key.public_key
+           ) do
+        {:ok, master_key} ->
+          case load_manifest_encrypted(master_key, salt) do
+            {:ok, manifest} -> {:ok, master_key, manifest}
+            error -> error
+          end
+
+        error ->
+          error
+      end
+    else
+      {:error, :not_enrolled} ->
+        {:error, :not_enrolled}
+
+      error ->
+        error
+    end
+  end
+
+  @spec load_wrapped_package() :: {:ok, WrappedKeyPackage.t()} | {:error, :not_found}
+  defp load_wrapped_package do
+    path = Path.join(Crispkey.data_dir(), "wrapped_key.enc")
+
+    case File.read(path) do
+      {:ok, data} ->
+        {:ok, json} = Jason.decode(data)
+
+        {:ok,
+         %WrappedKeyPackage{
+           encrypted_master_key: Base.decode64!(json["encrypted_master_key"]),
+           nonce: Base.decode64!(json["nonce"]),
+           tag: Base.decode64!(json["tag"]),
+           wrapped_dek: Base.decode64!(json["wrapped_dek"]),
+           salt: Base.decode64!(json["salt"]),
+           credential_id: Base.decode64!(json["credential_id"])
+         }}
+
+      {:error, :enoent} ->
+        {:error, :not_found}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 end

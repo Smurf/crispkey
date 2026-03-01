@@ -28,6 +28,7 @@ defmodule Crispkey.CLI do
       ["pair", target] -> pair(target)
       ["sync" | rest] -> sync(rest)
       ["vault" | rest] -> vault_cmd(rest)
+      ["yubikey" | rest] -> yubikey_cmd(rest)
       _ -> help()
     end
   end
@@ -39,12 +40,19 @@ defmodule Crispkey.CLI do
 
     Vault Commands:
       crispkey init              Initialize vault system
-      crispkey unlock            Unlock vaults with master password
+      crispkey unlock            Unlock vaults with master password or YubiKey
       crispkey lock              Lock vaults (clear master key from memory)
       crispkey vault list        List vaults
       crispkey vault import <fp> Import GPG key to vault
       crispkey vault export <fp> Export vault to GPG keyring
       crispkey vault delete <fp> Delete a vault
+
+    YubiKey Commands:
+      crispkey yubikey enroll      Enroll a new YubiKey/FIDO2 device
+      crispkey yubikey unlock      Unlock vaults with enrolled YubiKey
+      crispkey yubikey list        List enrolled YubiKey credentials
+      crispkey yubikey remove <id> Remove enrolled credential
+      crispkey yubikey status      Show YubiKey availability
 
     Sync Commands:
       crispkey status            Show sync status
@@ -103,8 +111,30 @@ defmodule Crispkey.CLI do
       System.halt(0)
     end
 
-    password = get_passphrase("Enter master password: ")
+    if Manager.yubikey_enrolled?() do
+      IO.puts("YubiKey available. Press Enter to use YubiKey, or enter password.")
+      password = IO.gets("Password or Enter for YubiKey: ") |> String.trim()
 
+      if password == "" do
+        case Manager.unlock_with_yubikey() do
+          :ok ->
+            IO.puts("Vaults unlocked with YubiKey")
+            System.halt(0)
+
+          {:error, reason} ->
+            IO.puts("YubiKey unlock failed: #{inspect(reason)}")
+            IO.puts("Trying password...")
+        end
+      else
+        unlock_with_password(password)
+      end
+    else
+      password = get_passphrase("Enter master password: ")
+      unlock_with_password(password)
+    end
+  end
+
+  defp unlock_with_password(password) do
     case Manager.unlock(password) do
       :ok ->
         IO.puts("Vaults unlocked")
@@ -120,6 +150,159 @@ defmodule Crispkey.CLI do
   defp lock do
     Manager.lock()
     IO.puts("Vaults locked")
+    System.halt(0)
+  end
+
+  @spec yubikey_cmd([String.t()]) :: no_return()
+  defp yubikey_cmd(args) do
+    case args do
+      [] ->
+        yubikey_status()
+
+      ["enroll" | _] ->
+        yubikey_enroll()
+
+      ["unlock" | _] ->
+        yubikey_unlock()
+
+      ["list" | _] ->
+        yubikey_list()
+
+      ["remove", cred_id] ->
+        yubikey_remove(cred_id)
+
+      ["status" | _] ->
+        yubikey_status()
+
+      _ ->
+        IO.puts("Usage:")
+        IO.puts("  crispkey yubikey enroll      - Enroll a new YubiKey")
+        IO.puts("  crispkey yubikey unlock      - Unlock with YubiKey")
+        IO.puts("  crispkey yubikey list       - List enrolled credentials")
+        IO.puts("  crispkey yubikey remove <id> - Remove credential")
+        IO.puts("  crispkey yubikey status     - Show YubiKey status")
+        System.halt(1)
+    end
+  end
+
+  @spec yubikey_enroll() :: no_return()
+  defp yubikey_enroll do
+    unless Manager.unlocked?() do
+      IO.puts("Error: Vaults must be unlocked first. Run 'crispkey unlock'.")
+      System.halt(1)
+    end
+
+    unless Manager.yubikey_available?() do
+      IO.puts("Error: No YubiKey or FIDO2 device detected.")
+      IO.puts("Please insert a YubiKey and try again.")
+      System.halt(1)
+    end
+
+    if Manager.yubikey_enrolled?() do
+      IO.puts("Warning: A YubiKey is already enrolled. Enrolling another will replace it.")
+    end
+
+    IO.puts("Enrolling YubiKey...")
+    IO.puts("Please touch your YubiKey when it blinks.")
+
+    case Manager.enroll_yubikey("") do
+      :ok ->
+        IO.puts("YubiKey enrolled successfully!")
+        IO.puts("You can now unlock your vaults with 'crispkey yubikey unlock'")
+        System.halt(0)
+
+      {:error, :not_available} ->
+        IO.puts("Error: FIDO2 tools not available. Please install libfido2.")
+        System.halt(1)
+
+      {:error, reason} ->
+        IO.puts("Error enrolling YubiKey: #{inspect(reason)}")
+        System.halt(1)
+    end
+  end
+
+  @spec yubikey_unlock() :: no_return()
+  defp yubikey_unlock do
+    if Manager.unlocked?() do
+      IO.puts("Vaults already unlocked")
+      System.halt(0)
+    end
+
+    unless Manager.yubikey_enrolled?() do
+      IO.puts("Error: No YubiKey enrolled. Run 'crispkey yubikey enroll' first.")
+      System.halt(1)
+    end
+
+    IO.puts("Touch your YubiKey to unlock vaults...")
+
+    case Manager.unlock_with_yubikey() do
+      :ok ->
+        IO.puts("Vaults unlocked with YubiKey")
+        System.halt(0)
+
+      {:error, :not_enrolled} ->
+        IO.puts("Error: No YubiKey enrolled")
+        System.halt(1)
+
+      {:error, :user_not_present} ->
+        IO.puts("Error: Please touch your YubiKey")
+        System.halt(1)
+
+      {:error, reason} ->
+        IO.puts("Error: #{inspect(reason)}")
+        System.halt(1)
+    end
+  end
+
+  @spec yubikey_list() :: no_return()
+  defp yubikey_list do
+    case Manager.list_yubikey_credentials() do
+      {:ok, []} ->
+        IO.puts("No YubiKey credentials enrolled")
+
+      {:ok, creds} ->
+        IO.puts("Enrolled YubiKey credentials:")
+
+        Enum.each(creds, fn cred ->
+          IO.puts("  - #{cred.credential_id}")
+        end)
+
+      {:error, reason} ->
+        IO.puts("Error: #{inspect(reason)}")
+    end
+
+    System.halt(0)
+  end
+
+  @spec yubikey_remove(String.t()) :: no_return()
+  defp yubikey_remove(cred_id) do
+    case Manager.remove_yubikey_credential(cred_id) do
+      :ok ->
+        IO.puts("Credential removed")
+        System.halt(0)
+
+      {:error, reason} ->
+        IO.puts("Error: #{inspect(reason)}")
+        System.halt(1)
+    end
+  end
+
+  @spec yubikey_status() :: no_return()
+  defp yubikey_status do
+    device_available = Manager.yubikey_available?()
+    enrolled = Manager.yubikey_enrolled?()
+
+    IO.puts("YubiKey/FIDO2 Status:")
+    IO.puts("  Device available: #{device_available}")
+    IO.puts("  YubiKey enrolled: #{enrolled}")
+
+    unless device_available do
+      IO.puts("")
+      IO.puts("Note: To use YubiKey authentication, you need:")
+      IO.puts("  1. A FIDO2/YubiKey 5 series device")
+      IO.puts("  2. libfido2 installed (fido2-tools on Linux)")
+    end
+
     System.halt(0)
   end
 

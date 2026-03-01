@@ -320,6 +320,7 @@ config :crispkey,
 ## Dependencies
 
 - `jason` - JSON encoding/decoding
+- `cbor` - CBOR encoding/decoding (FIDO2)
 - `ranch` - TCP acceptor pool (dependency, not currently used directly)
 - `norm` - Data validation
 - `dialyxir` - Static analysis (dev/test)
@@ -350,6 +351,79 @@ The Merge.Engine module handles conflict detection:
 - Expiry conflicts (different expiry dates)
 - Returns `{:conflict, conflicts}` or `{:ok, merged_key}`
 
+## FIDO2/YubiKey Authentication
+
+Crispkey supports hardware key authentication using FIDO2/YubiKey devices. This provides an alternative to password-based vault unlocking.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              YubiKey/FIDO2 Authentication Flow                    │
+├─────────────────────────────────────────────────────────────────┤
+│  Enrollment:                                                    │
+│  1. Generate random Data Encryption Key (DEK)                   │
+│  2. Create FIDO2 credential on YubiKey                          │
+│  3. Wrap (encrypt) DEK using FIDO2 signature                    │
+│  4. Store wrapped package + public key                          │
+│                                                                  │
+│  Unlock:                                                         │
+│  1. Generate FIDO2 assertion (PIN + touch)                      │
+│  2. Use assertion to unwrap DEK                                  │
+│  3. Use DEK to decrypt master key                               │
+│  4. Master key decrypts manifest and vaults                     │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Components
+
+- `lib/crispkey/fido2/types.ex` - FIDO2 type definitions
+- `lib/crispkey/fido2/bindings.ex` - libfido2 command-line tool wrappers
+- `lib/crispkey/fido2/client.ex` - High-level FIDO2 API
+
+### Storage
+
+```
+~/.config/crispkey/
+├── wrapped_key              # FIDO2 credential storage
+└── wrapped_key.enc         # Encrypted master key package
+```
+
+### Requirements
+
+- libfido2 installed (`fido2-tools` on Linux, `libfido2` on macOS)
+- FIDO2/YubiKey 5 series or other CTAP2-compatible device
+
+### CLI Commands
+
+```bash
+# Check YubiKey status
+crispkey yubikey status
+
+# Enroll a new YubiKey (vaults must be unlocked first)
+crispkey yubikey enroll
+
+# Unlock with YubiKey
+crispkey yubikey unlock
+
+# Or just use unlock and press Enter for YubiKey
+crispkey unlock
+
+# List enrolled credentials
+crispkey yubikey list
+
+# Remove enrolled credential
+crispkey yubikey remove <credential_id>
+```
+
+### Security Properties
+
+| Threat | Protection |
+|--------|------------|
+| Password compromised | YubiKey still protects vaults |
+| YubiKey stolen | Requires PIN + physical touch |
+| Device cloned | YubiKey private keys cannot be extracted |
+
 ## Migration from v1
 
 If upgrading from the legacy format:
@@ -364,6 +438,5 @@ If upgrading from the legacy format:
 - Vault sharing with per-user access
 - Relay server for remote sync
 - Conflict resolution UI
-- Hardware key support (YubiKey)
 - Supervised daemon process
 - Test suite

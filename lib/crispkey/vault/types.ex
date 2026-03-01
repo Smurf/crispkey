@@ -3,6 +3,31 @@ defmodule Crispkey.Vault.Types do
   Type definitions for vault system.
   """
 
+  @type auth_method :: :password | :yubikey | :hybrid
+
+  defmodule WrappedKeyPackage do
+    @moduledoc """
+    Contains the master key wrapped for YubiKey authentication.
+    """
+    defstruct [
+      :encrypted_master_key,
+      :nonce,
+      :tag,
+      :wrapped_dek,
+      :salt,
+      :credential_id
+    ]
+
+    @type t :: %__MODULE__{
+            encrypted_master_key: binary(),
+            nonce: binary(),
+            tag: binary(),
+            wrapped_dek: binary(),
+            salt: binary(),
+            credential_id: binary()
+          }
+  end
+
   defmodule Vault do
     @moduledoc """
     Represents a single encrypted vault containing a GPG key.

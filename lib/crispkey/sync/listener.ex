@@ -11,7 +11,6 @@ defmodule Crispkey.Sync.Listener do
 
   @type state :: %{
           listen_socket: :gen_tcp.socket(),
-          accept_ref: reference() | nil,
           connections: %{String.t() => pid()},
           port: non_neg_integer()
         }
@@ -46,31 +45,36 @@ defmodule Crispkey.Sync.Listener do
         {:reuseaddr, true}
       ])
 
-    state = %{listen_socket: listen_socket, accept_ref: nil, connections: %{}, port: port}
-    {:ok, schedule_accept(state)}
+    send(self(), :accept)
+
+    {:ok, %{listen_socket: listen_socket, connections: %{}, port: port}}
   end
 
   @impl true
-  def handle_info(
-        {:inet_async, listen_socket, ref, result},
-        %{listen_socket: listen_socket, accept_ref: ref} = state
-      ) do
-    case result do
+  def handle_info(:accept, state) do
+    case :gen_tcp.accept(state.listen_socket, :infinity) do
       {:ok, socket} ->
-        case setup_connection(socket) do
-          :ok -> :ok
-          {:error, reason} -> Logger.error("Failed to setup connection: #{inspect(reason)}")
+        case Peer.start(socket) do
+          {:ok, peer_pid} ->
+            case :gen_tcp.controlling_process(socket, peer_pid) do
+              :ok -> :ok
+              {:error, reason} -> Logger.error("Failed to assign control: #{inspect(reason)}")
+            end
+
+          {:error, reason} ->
+            Logger.error("Failed to start peer: #{inspect(reason)}")
+            :gen_tcp.close(socket)
         end
 
+        send(self(), :accept)
+        {:noreply, state}
+
       {:error, reason} ->
-        Logger.warning("Accept failed: #{inspect(reason)}")
+        Logger.error("Accept failed: #{inspect(reason)}")
+        Process.sleep(1000)
+        send(self(), :accept)
+        {:noreply, state}
     end
-
-    {:noreply, schedule_accept(%{state | accept_ref: nil})}
-  end
-
-  def handle_info({:inet_async, _listen_socket, _ref, _result}, state) do
-    {:noreply, state}
   end
 
   def handle_info({:tcp, _socket, _data}, state) do
@@ -121,31 +125,4 @@ defmodule Crispkey.Sync.Listener do
   end
 
   def terminate(_reason, _state), do: :ok
-
-  @spec schedule_accept(state()) :: state()
-  defp schedule_accept(%{listen_socket: listen_socket} = state) do
-    {:ok, ref} = :prim_inet.async_accept(listen_socket, -1)
-    %{state | accept_ref: ref}
-  end
-
-  @spec setup_accept_opts(:gen_tcp.socket()) :: :ok | {:error, term()}
-  defp setup_accept_opts(socket) do
-    case :inet.setopts(socket, [{:active, false}, {:packet, 0}, :binary]) do
-      :ok -> :ok
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  @spec setup_connection(:gen_tcp.socket()) :: :ok | {:error, term()}
-  defp setup_connection(socket) do
-    with :ok <- setup_accept_opts(socket),
-         {:ok, peer_pid} <- Peer.start(socket),
-         :ok <- :gen_tcp.controlling_process(socket, peer_pid) do
-      :ok
-    else
-      {:error, reason} ->
-        :gen_tcp.close(socket)
-        {:error, reason}
-    end
-  end
 end

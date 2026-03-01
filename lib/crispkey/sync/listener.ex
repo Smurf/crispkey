@@ -52,7 +52,7 @@ defmodule Crispkey.Sync.Listener do
 
   @impl true
   def handle_info(:accept, state) do
-    case :gen_tcp.accept(state.listen_socket, 0) do
+    case :gen_tcp.accept(state.listen_socket, :infinity) do
       {:ok, socket} ->
         case Peer.start(socket) do
           {:ok, peer_pid} ->
@@ -61,14 +61,17 @@ defmodule Crispkey.Sync.Listener do
               {:error, reason} -> Logger.error("Failed to assign control: #{inspect(reason)}")
             end
 
-          _ ->
-            :ok
+          {:error, reason} ->
+            Logger.error("Failed to start peer: #{inspect(reason)}")
+            :gen_tcp.close(socket)
         end
 
         send(self(), :accept)
         {:noreply, state}
 
-      {:error, :timeout} ->
+      {:error, reason} ->
+        Logger.error("Accept failed: #{inspect(reason)}")
+        Process.sleep(1000)
         send(self(), :accept)
         {:noreply, state}
     end
@@ -113,4 +116,13 @@ defmodule Crispkey.Sync.Listener do
     result = Peer.sync(peer_id)
     {:reply, result, state}
   end
+
+  @impl true
+  def terminate(reason, %{listen_socket: listen_socket}) do
+    Logger.info("Listener terminating: #{inspect(reason)}")
+    :gen_tcp.close(listen_socket)
+    :ok
+  end
+
+  def terminate(_reason, _state), do: :ok
 end

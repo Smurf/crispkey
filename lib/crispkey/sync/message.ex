@@ -276,10 +276,6 @@ defmodule Crispkey.Sync.Message do
     end
   end
 
-  defp decode_session_id(nil), do: {:ok, nil}
-  defp decode_session_id(b64) when is_binary(b64), do: Base.decode64(b64)
-  defp decode_session_id(_), do: {:error, :invalid_session_id}
-
   defp from_wire_type(Auth, %{"password_hash" => hash}) when is_binary(hash) do
     {:ok, %Auth{password_hash: hash}}
   end
@@ -339,6 +335,10 @@ defmodule Crispkey.Sync.Message do
   end
 
   defp from_wire_type(_module, _data), do: {:error, :invalid_message_fields}
+
+  defp decode_session_id(nil), do: {:ok, nil}
+  defp decode_session_id(b64) when is_binary(b64), do: Base.decode64(b64)
+  defp decode_session_id(_), do: {:error, :invalid_session_id}
 
   @spec validate_device_id(term()) :: :ok | {:error, :invalid_device_id}
   defp validate_device_id(id) when is_binary(id) and byte_size(id) > 0, do: :ok

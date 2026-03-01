@@ -64,6 +64,11 @@ defmodule Crispkey.Store.LocalState do
     GenServer.call(__MODULE__, {:verify_sync_password, hash})
   end
 
+  @spec yubikey_only?() :: boolean()
+  def yubikey_only? do
+    GenServer.call(__MODULE__, :yubikey_only?)
+  end
+
   @impl true
   @spec init([]) :: {:ok, state()}
   def init([]) do
@@ -122,6 +127,10 @@ defmodule Crispkey.Store.LocalState do
     {:reply, result, state}
   end
 
+  def handle_call(:yubikey_only?, _from, state) do
+    {:reply, state.yubikey_only, state}
+  end
+
   @spec load_state() :: state()
   defp load_state do
     path = state_path()
@@ -132,7 +141,8 @@ defmodule Crispkey.Store.LocalState do
       key_syncs: %{},
       last_sync: nil,
       initialized: false,
-      sync_password_hash: nil
+      sync_password_hash: nil,
+      yubikey_only: false
     }
 
     case File.read(path) do
@@ -155,6 +165,7 @@ defmodule Crispkey.Store.LocalState do
     device_id = Map.get(raw_state, "device_id", default.device_id)
     initialized = Map.get(raw_state, "initialized", false)
     sync_password_hash = Map.get(raw_state, "sync_password_hash")
+    yubikey_only = Map.get(raw_state, "yubikey_only", false)
     last_sync = parse_datetime(Map.get(raw_state, "last_sync"))
 
     peers =
@@ -173,7 +184,8 @@ defmodule Crispkey.Store.LocalState do
       sync_password_hash: sync_password_hash,
       peers: peers,
       key_syncs: key_syncs,
-      last_sync: last_sync
+      last_sync: last_sync,
+      yubikey_only: yubikey_only
     }
   end
 
@@ -232,6 +244,7 @@ defmodule Crispkey.Store.LocalState do
       "device_id" => state.device_id,
       "initialized" => state.initialized,
       "sync_password_hash" => state.sync_password_hash,
+      "yubikey_only" => state.yubikey_only,
       "peers" => peers_to_json(state.peers),
       "key_syncs" => key_syncs_to_json(state.key_syncs),
       "last_sync" => state.last_sync && DateTime.to_iso8601(state.last_sync)

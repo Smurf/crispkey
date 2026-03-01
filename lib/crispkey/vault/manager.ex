@@ -12,6 +12,7 @@ defmodule Crispkey.Vault.Manager do
 
   alias Crispkey.FIDO2.Client, as: FIDO2Client
   alias Crispkey.FIDO2.Types, as: FIDO2Types
+  alias Crispkey.Store.LocalState
   alias Crispkey.Vault.{Crypto, ManifestModule, Types}
   alias Types.{Manifest, Vault, VaultEntry, WrappedKeyPackage}
 
@@ -93,6 +94,11 @@ defmodule Crispkey.Vault.Manager do
   @spec initialize(String.t()) :: :ok
   def initialize(password) do
     GenServer.call(__MODULE__, {:initialize, password})
+  end
+
+  @spec initialize_yubikey() :: :ok | {:error, :not_available | :enrollment_failed | term()}
+  def initialize_yubikey do
+    GenServer.call(__MODULE__, :initialize_yubikey)
   end
 
   @spec get_manifest() :: {:ok, Manifest.t()} | {:error, :locked}
@@ -203,27 +209,31 @@ defmodule Crispkey.Vault.Manager do
 
   @impl true
   def handle_call({:unlock, password}, _from, state) do
-    case load_master_salt() do
-      {:ok, salt} ->
-        master_key = Crypto.derive_master_key(password, salt)
+    if LocalState.yubikey_only?() do
+      {:reply, {:error, :yubikey_only}, state}
+    else
+      case load_master_salt() do
+        {:ok, salt} ->
+          master_key = Crypto.derive_master_key(password, salt)
 
-        case load_manifest_encrypted(master_key, salt) do
-          {:ok, manifest} ->
-            {:reply, :ok,
-             %{
-               state
-               | master_key: master_key,
-                 master_salt: salt,
-                 manifest: manifest,
-                 unlocked: true
-             }}
+          case load_manifest_encrypted(master_key, salt) do
+            {:ok, manifest} ->
+              {:reply, :ok,
+               %{
+                 state
+                 | master_key: master_key,
+                   master_salt: salt,
+                   manifest: manifest,
+                   unlocked: true
+               }}
 
-          {:error, _} ->
-            {:reply, {:error, :invalid_password}, state}
-        end
+            {:error, _} ->
+              {:reply, {:error, :invalid_password}, state}
+          end
 
-      {:error, :not_initialized} ->
-        {:reply, {:error, :not_initialized}, state}
+        {:error, :not_initialized} ->
+          {:reply, {:error, :not_initialized}, state}
+      end
     end
   end
 
@@ -296,6 +306,47 @@ defmodule Crispkey.Vault.Manager do
 
     {:reply, :ok,
      %{state | master_key: master_key, master_salt: salt, manifest: manifest, unlocked: true}}
+  end
+
+  def handle_call(:initialize_yubikey, _from, state) do
+    if state.unlocked do
+      {:reply, {:error, :already_unlocked}, state}
+    else
+      do_initialize_yubikey(state)
+    end
+  end
+
+  defp do_initialize_yubikey(state) do
+    master_key = :crypto.strong_rand_bytes(32)
+    salt = Crypto.generate_master_salt()
+
+    case do_enroll_yubikey(master_key, salt) do
+      {:ok, _wrapped_key} ->
+        save_master_salt!(salt)
+
+        manifest = %Manifest{
+          vaults: %{},
+          salt: salt,
+          version: 1,
+          created_at: DateTime.utc_now(),
+          modified_at: DateTime.utc_now()
+        }
+
+        save_manifest_encrypted!(manifest, master_key, salt)
+
+        {:reply, :ok,
+         %{
+           state
+           | master_key: master_key,
+             master_salt: salt,
+             manifest: manifest,
+             unlocked: true,
+             auth_method: :yubikey
+         }}
+
+      error ->
+        {:reply, error, state}
+    end
   end
 
   def handle_call({:create_vault, fingerprint, public_key, secret_key, trust}, _from, state) do

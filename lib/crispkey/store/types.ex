@@ -26,7 +26,8 @@ defmodule Crispkey.Store.State do
     initialized: false,
     peers: %{},
     key_syncs: %{},
-    last_sync: nil
+    last_sync: nil,
+    yubikey_only: false
   ]
 
   @type t :: %__MODULE__{
@@ -35,6 +36,7 @@ defmodule Crispkey.Store.State do
           sync_password_hash: String.t() | nil,
           peers: %{String.t() => Crispkey.Store.Peer.t()},
           key_syncs: %{String.t() => %{String.t() => DateTime.t()}},
-          last_sync: DateTime.t() | nil
+          last_sync: DateTime.t() | nil,
+          yubikey_only: boolean()
         }
 end

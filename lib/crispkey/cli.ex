@@ -17,7 +17,7 @@ defmodule Crispkey.CLI do
     case args do
       ["help" | _] -> help()
       [] -> help()
-      ["init" | _] -> init()
+      ["init" | rest] -> init(rest)
       ["unlock" | _] -> unlock()
       ["lock" | _] -> lock()
       ["status" | _] -> status()
@@ -67,8 +67,19 @@ defmodule Crispkey.CLI do
     System.halt(0)
   end
 
-  @spec init() :: no_return()
-  defp init do
+  @spec init([String.t()]) :: no_return()
+  defp init(args) do
+    use_yubikey = "--yubikey" in args or "--passkey" in args
+
+    if use_yubikey do
+      init_yubikey()
+    else
+      init_password()
+    end
+  end
+
+  @spec init_password() :: no_return()
+  defp init_password do
     IO.puts("Initializing crispkey vault system...")
 
     File.mkdir_p!(Crispkey.data_dir())
@@ -92,7 +103,7 @@ defmodule Crispkey.CLI do
 
     :ok = Manager.initialize(passphrase)
 
-    Store.LocalState.update_state(fn s -> %{s | initialized: true} end)
+    Store.LocalState.update_state(fn s -> %{s | initialized: true, yubikey_only: false} end)
     Store.LocalState.set_sync_password(sync_password)
 
     IO.puts("Initialized successfully.")
@@ -104,6 +115,52 @@ defmodule Crispkey.CLI do
     System.halt(0)
   end
 
+  @spec init_yubikey() :: no_return()
+  defp init_yubikey do
+    IO.puts("Initializing crispkey vault system with YubiKey...")
+
+    unless Manager.yubikey_available?() do
+      IO.puts("Error: No YubiKey or FIDO2 device detected.")
+      IO.puts("Please insert a YubiKey and try again.")
+      System.halt(1)
+    end
+
+    File.mkdir_p!(Crispkey.data_dir())
+    File.mkdir_p!(Manager.vaults_dir())
+
+    IO.puts("Please touch your YubiKey when it blinks...")
+
+    case Manager.initialize_yubikey() do
+      :ok ->
+        sync_password = get_passphrase("Enter sync password (for remote devices): ")
+        sync_confirm = get_passphrase("Confirm sync password: ")
+
+        if sync_password != sync_confirm do
+          IO.puts("Sync passwords do not match")
+          System.halt(1)
+        end
+
+        Store.LocalState.update_state(fn s -> %{s | initialized: true, yubikey_only: true} end)
+        Store.LocalState.set_sync_password(sync_password)
+
+        IO.puts("")
+        IO.puts("Initialized successfully with YubiKey-only authentication.")
+        IO.puts("Device ID: #{Crispkey.device_id()}")
+        IO.puts("")
+        IO.puts("IMPORTANT: Your vault is now linked to your YubiKey.")
+        IO.puts("If you lose your YubiKey, you will NOT be able to recover your vaults.")
+        IO.puts("There is no password fallback.")
+        IO.puts("")
+        IO.puts("Vaults are encrypted and stored in: #{Manager.vaults_dir()}")
+
+        System.halt(0)
+
+      {:error, reason} ->
+        IO.puts("Error initializing with YubiKey: #{inspect(reason)}")
+        System.halt(1)
+    end
+  end
+
   @spec unlock() :: no_return()
   defp unlock do
     if Manager.unlocked?() do
@@ -111,26 +168,34 @@ defmodule Crispkey.CLI do
       System.halt(0)
     end
 
-    if Manager.yubikey_enrolled?() do
-      IO.puts("YubiKey available. Press Enter to use YubiKey, or enter password.")
-      password = IO.gets("Password or Enter for YubiKey: ") |> String.trim()
+    yubikey_only = Store.LocalState.yubikey_only?()
 
-      if password == "" do
-        case Manager.unlock_with_yubikey() do
-          :ok ->
-            IO.puts("Vaults unlocked with YubiKey")
-            System.halt(0)
+    cond do
+      yubikey_only ->
+        IO.puts("This vault requires YubiKey authentication.")
+        yubikey_unlock()
 
-          {:error, reason} ->
-            IO.puts("YubiKey unlock failed: #{inspect(reason)}")
-            IO.puts("Trying password...")
+      Manager.yubikey_enrolled?() ->
+        IO.puts("YubiKey available. Press Enter to use YubiKey, or enter password.")
+        password = IO.gets("Password or Enter for YubiKey: ") |> String.trim()
+
+        if password == "" do
+          case Manager.unlock_with_yubikey() do
+            :ok ->
+              IO.puts("Vaults unlocked with YubiKey")
+              System.halt(0)
+
+            {:error, reason} ->
+              IO.puts("YubiKey unlock failed: #{inspect(reason)}")
+              IO.puts("Trying password...")
+          end
+        else
+          unlock_with_password(password)
         end
-      else
+
+      true ->
+        password = get_passphrase("Enter master password: ")
         unlock_with_password(password)
-      end
-    else
-      password = get_passphrase("Enter master password: ")
-      unlock_with_password(password)
     end
   end
 
@@ -142,6 +207,11 @@ defmodule Crispkey.CLI do
 
       {:error, :invalid_password} ->
         IO.puts("Invalid password")
+        System.halt(1)
+
+      {:error, :yubikey_only} ->
+        IO.puts("This vault requires YubiKey authentication.")
+        IO.puts("Use 'crispkey yubikey unlock' to unlock with your YubiKey.")
         System.halt(1)
     end
   end

@@ -128,9 +128,11 @@ defmodule Crispkey.CLI do
     File.mkdir_p!(Crispkey.data_dir())
     File.mkdir_p!(Manager.vaults_dir())
 
+    pin = get_pin("Enter YubiKey PIN: ")
+
     IO.puts("Please touch your YubiKey when it blinks...")
 
-    case Manager.initialize_yubikey() do
+    case Manager.initialize_yubikey(pin) do
       :ok ->
         sync_password = get_passphrase("Enter sync password (for remote devices): ")
         sync_confirm = get_passphrase("Confirm sync password: ")
@@ -272,10 +274,12 @@ defmodule Crispkey.CLI do
       IO.puts("Warning: A YubiKey is already enrolled. Enrolling another will replace it.")
     end
 
+    pin = get_pin("Enter YubiKey PIN: ")
+
     IO.puts("Enrolling YubiKey...")
     IO.puts("Please touch your YubiKey when it blinks.")
 
-    case Manager.enroll_yubikey("") do
+    case Manager.enroll_yubikey(pin) do
       :ok ->
         IO.puts("YubiKey enrolled successfully!")
         IO.puts("You can now unlock your vaults with 'crispkey yubikey unlock'")
@@ -790,6 +794,12 @@ defmodule Crispkey.CLI do
     end
 
     passphrase
+  end
+
+  @spec get_pin(String.t()) :: String.t()
+  defp get_pin(prompt) do
+    IO.write(:stderr, prompt)
+    IO.gets("") |> to_string() |> String.replace("\r", "") |> String.trim()
   end
 
   @spec configure_runtime() :: :ok

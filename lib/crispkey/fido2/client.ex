@@ -37,52 +37,96 @@ defmodule Crispkey.FIDO2.Client do
 
   Returns the credential_id and public_key needed for storage.
   """
-  @spec enroll() ::
+  @spec enroll(String.t()) ::
           {:ok, Types.WrappedKey.t()} | {:error, :not_available | :enrollment_failed | term()}
-  def enroll do
+  def enroll(pin) do
     if available?() do
-      do_enroll()
+      do_enroll(pin)
     else
       {:error, :not_available}
     end
   end
 
-  defp do_enroll do
+  defp do_enroll(pin) do
     challenge = :crypto.strong_rand_bytes(32)
-    encoded_challenge = Base.encode64(challenge)
 
-    temp_file = Path.join(System.tmp_dir!(), "crispkey_enroll_#{:rand.uniform(1_000_000)}")
+    client_data_hash =
+      :crypto.hash(
+        :sha256,
+        Jason.encode!(%{
+          type: "webauthn.create",
+          challenge: Base.url_encode64(challenge, padding: false),
+          origin: "crispkey://localhost"
+        })
+      )
+
+    encoded_chdh = Base.encode64(client_data_hash)
+    user_id = :crypto.strong_rand_bytes(16)
+    encoded_user_id = Base.encode64(user_id)
+
+    device = find_fido_device()
+
+    input = "#{encoded_chdh}\n#{@rp_id}\ncrispkey\n#{encoded_user_id}\n"
+
+    temp_input = Path.join(System.tmp_dir!(), "crispkey_cred_in_#{:rand.uniform(1_000_000)}")
+    temp_output = Path.join(System.tmp_dir!(), "crispkey_cred_out_#{:rand.uniform(1_000_000)}")
 
     try do
-      File.write!(temp_file, challenge)
+      File.write!(temp_input, input)
 
-      result =
-        System.cmd("fido2-token", [
-          "-r",
-          @rp_id,
-          "-t",
-          "up",
-          "-t",
-          "uv=disc",
-          "-c",
-          @rp_name,
-          "-i",
-          encoded_challenge,
-          "-P",
-          "crispkey",
-          temp_file
-        ])
+      result = run_fido2_cred_with_pin(pin, temp_input, temp_output, device)
 
       case result do
         {output, 0} ->
-          parse_enrollment_response(output)
+          parse_enrollment_response_file(temp_output)
 
         {error, code} when code > 0 ->
           {:error, {:enrollment_failed, error}}
+
+        {output, _} ->
+          {:error, {:enrollment_failed, output}}
       end
     after
-      File.rm(temp_file)
+      File.rm(temp_input)
+      File.rm(temp_output)
     end
+  end
+
+  defp find_fido_device do
+    case System.cmd("fido2-token", ["-L"]) do
+      {output, 0} ->
+        case String.split(output, "\n", trim: true) do
+          [device | _] ->
+            case String.split(device, ":", parts: 2) do
+              [path, _] -> String.trim(path)
+              _ -> device
+            end
+
+          [] ->
+            "/dev/hidraw0"
+        end
+
+      _ ->
+        "/dev/hidraw0"
+    end
+  end
+
+  defp prompt_pin do
+    IO.gets("Enter YubiKey PIN: ") |> String.trim()
+  end
+
+  defp run_fido2_cred_with_pin(pin, temp_input, temp_output, device) do
+    cmd = "printf '%s' '#{pin}' | fido2-cred -M -i #{temp_input} -o #{temp_output} #{device} es256 2>&1"
+
+    result = :os.cmd(String.to_charlist(cmd))
+    output = List.to_string(result)
+    
+    if String.contains?(output, "credentialId:") or String.contains?(output, "publicKey:") do
+      {output, 0}
+    else
+      {output, 1}
+    end
+  end
   end
 
   defp parse_enrollment_response(output) do
@@ -113,6 +157,16 @@ defmodule Crispkey.FIDO2.Client do
        }}
     else
       {:error, :enrollment_parse_failed}
+    end
+  end
+
+  defp parse_enrollment_response_file(output_path) do
+    case File.read(output_path) do
+      {:ok, output} ->
+        parse_enrollment_response(output)
+
+      {:error, reason} ->
+        {:error, {:enrollment_parse_failed, reason}}
     end
   end
 

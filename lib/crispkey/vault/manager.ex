@@ -96,9 +96,10 @@ defmodule Crispkey.Vault.Manager do
     GenServer.call(__MODULE__, {:initialize, password})
   end
 
-  @spec initialize_yubikey() :: :ok | {:error, :not_available | :enrollment_failed | term()}
-  def initialize_yubikey do
-    GenServer.call(__MODULE__, :initialize_yubikey)
+  @spec initialize_yubikey(String.t()) ::
+          :ok | {:error, :not_available | :enrollment_failed | term()}
+  def initialize_yubikey(pin) do
+    GenServer.call(__MODULE__, {:initialize_yubikey, pin})
   end
 
   @spec get_manifest() :: {:ok, Manifest.t()} | {:error, :locked}
@@ -117,8 +118,8 @@ defmodule Crispkey.Vault.Manager do
   end
 
   @spec enroll_yubikey(String.t()) :: :ok | {:error, :not_available | :enrollment_failed | term()}
-  def enroll_yubikey(password) do
-    GenServer.call(__MODULE__, {:enroll_yubikey, password})
+  def enroll_yubikey(pin) do
+    GenServer.call(__MODULE__, {:enroll_yubikey, pin})
   end
 
   @spec unlock_with_yubikey() ::
@@ -246,9 +247,9 @@ defmodule Crispkey.Vault.Manager do
     {:reply, state.auth_method, state}
   end
 
-  def handle_call({:enroll_yubikey, _password}, _from, state) do
+  def handle_call({:enroll_yubikey, pin}, _from, state) do
     if state.unlocked and state.master_key do
-      case do_enroll_yubikey(state.master_key, state.master_salt) do
+      case do_enroll_yubikey(state.master_key, state.master_salt, pin) do
         {:ok, _wrapped_key} ->
           {:reply, :ok, %{state | auth_method: :yubikey}}
 
@@ -308,19 +309,19 @@ defmodule Crispkey.Vault.Manager do
      %{state | master_key: master_key, master_salt: salt, manifest: manifest, unlocked: true}}
   end
 
-  def handle_call(:initialize_yubikey, _from, state) do
+  def handle_call({:initialize_yubikey, pin}, _from, state) do
     if state.unlocked do
       {:reply, {:error, :already_unlocked}, state}
     else
-      do_initialize_yubikey(state)
+      do_initialize_yubikey(state, pin)
     end
   end
 
-  defp do_initialize_yubikey(state) do
+  defp do_initialize_yubikey(state, pin) do
     master_key = :crypto.strong_rand_bytes(32)
     salt = Crypto.generate_master_salt()
 
-    case do_enroll_yubikey(master_key, salt) do
+    case do_enroll_yubikey(master_key, salt, pin) do
       {:ok, _wrapped_key} ->
         save_master_salt!(salt)
 
@@ -623,10 +624,10 @@ defmodule Crispkey.Vault.Manager do
     :ok = File.write(path, encrypted)
   end
 
-  @spec do_enroll_yubikey(binary(), binary()) ::
+  @spec do_enroll_yubikey(binary(), binary(), String.t()) ::
           {:ok, FIDO2Types.WrappedKey.t()} | {:error, term()}
-  defp do_enroll_yubikey(master_key, salt) do
-    case FIDO2Client.enroll() do
+  defp do_enroll_yubikey(master_key, salt, pin) do
+    case FIDO2Client.enroll(pin) do
       {:ok, wrapped_key} ->
         dek = Crypto.generate_dek()
         challenge = Crypto.create_fido2_challenge(dek)

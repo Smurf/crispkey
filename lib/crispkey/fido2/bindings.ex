@@ -228,9 +228,9 @@ defmodule Crispkey.FIDO2.Bindings do
 
     %{
       raw: line,
-      vendor_id: Enum.at(parts, 0) |> String.trim(),
-      product_id: Enum.at(parts, 1) |> String.trim(),
-      description: Enum.at(parts, 2) |> String.trim("")
+      vendor_id: Enum.at(parts, 0) |> then(&(&1 && String.trim(&1))),
+      product_id: Enum.at(parts, 1) |> then(&(&1 && String.trim(&1))),
+      description: Enum.at(parts, 2) |> then(&(&1 && String.trim(&1, "")))
     }
   end
 end

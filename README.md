@@ -1,6 +1,7 @@
 # crispkey
 
-** DISCLAIMER **
+**DISCLAIMER**
+
 This repository is purely vibe coded. I have no clue how this actually works. Do not use this in production under any circumstance.
 GPG key synchronization across devices using encrypted vaults and peer-to-peer sync.
 

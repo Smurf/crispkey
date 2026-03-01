@@ -3,7 +3,7 @@ defmodule Crispkey.CLI do
   Command-line interface for crispkey.
   """
 
-  alias Crispkey.{Crypto, Store}
+  alias Crispkey.Store
   alias Crispkey.GPG.Interface, as: GPGInterface
   alias Crispkey.Store.{LocalState, Peers}
   alias Crispkey.Sync.{Connection, Daemon, Discovery, Listener}
@@ -28,9 +28,6 @@ defmodule Crispkey.CLI do
       ["pair", target] -> pair(target)
       ["sync" | rest] -> sync(rest)
       ["vault" | rest] -> vault_cmd(rest)
-      ["export", fp | _] -> export_key(fp)
-      ["wrap", fp | _] -> wrap_key(fp)
-      ["unwrap", file | _] -> unwrap_key(file)
       _ -> help()
     end
   end
@@ -57,11 +54,6 @@ defmodule Crispkey.CLI do
       crispkey discover [sec]    Find devices on network
       crispkey pair <id|host>    Pair with a device
       crispkey sync [device]     Sync vaults with device(s)
-
-    Legacy Commands:
-      crispkey export <fp>       Export key (armored)
-      crispkey wrap <fp>         Export wrapped key
-      crispkey unwrap <file>     Import wrapped key
     """)
 
     System.halt(0)
@@ -532,89 +524,6 @@ defmodule Crispkey.CLI do
 
   defp report_sync_result(_peer_id, {:error, reason}) do
     IO.puts("Sync failed: #{inspect(reason)}")
-  end
-
-  @spec export_key(String.t()) :: no_return()
-  defp export_key(fingerprint) do
-    case GPGInterface.export_public_key(fingerprint) do
-      {:ok, data} ->
-        IO.puts(data)
-
-      {:error, {_, msg}} ->
-        IO.puts("Export failed: #{msg}")
-    end
-
-    System.halt(0)
-  end
-
-  @spec wrap_key(String.t()) :: no_return()
-  defp wrap_key(fingerprint) do
-    passphrase = get_passphrase("Enter wrapping passphrase: ")
-
-    with {:ok, pub_data} <- GPGInterface.export_public_key(fingerprint),
-         {:ok, sec_data} <- GPGInterface.export_secret_key(fingerprint),
-         {:ok, trust_data} <- GPGInterface.export_trustdb() do
-      bundle =
-        Jason.encode!(%{
-          public: pub_data,
-          secret: sec_data,
-          trust: trust_data,
-          fingerprint: fingerprint
-        })
-
-      wrapped = Crypto.KeyWrapper.wrap(bundle, passphrase)
-
-      filename = "crispkey_#{fingerprint}.wrapped"
-      File.write!(filename, wrapped)
-      IO.puts("Wrapped key written to #{filename}")
-    else
-      {:error, {_, msg}} ->
-        IO.puts("Export failed: #{msg}")
-    end
-
-    System.halt(0)
-  end
-
-  @spec unwrap_key(String.t()) :: no_return()
-  defp unwrap_key(file) do
-    passphrase = get_passphrase("Enter wrapping passphrase: ")
-    wrapped = File.read!(file)
-
-    case Crypto.KeyWrapper.unwrap(wrapped, passphrase) do
-      {:ok, bundle_json} ->
-        unwrap_key_from_bundle(bundle_json)
-
-      {:error, :decryption_failed} ->
-        IO.puts("Decryption failed - wrong passphrase?")
-    end
-
-    System.halt(0)
-  end
-
-  defp unwrap_key_from_bundle(bundle_json) do
-    case Jason.decode(bundle_json) do
-      {:ok, bundle} ->
-        public = Map.get(bundle, "public")
-        secret = Map.get(bundle, "secret")
-        trust = Map.get(bundle, "trust")
-        fingerprint = Map.get(bundle, "fingerprint")
-
-        import_keys_from_bundle(public, secret, trust, fingerprint)
-
-      {:error, _} ->
-        IO.puts("Failed to parse key bundle")
-    end
-  end
-
-  defp import_keys_from_bundle(public, secret, trust, fingerprint) do
-    with {:ok, _} <- GPGInterface.import_key(public),
-         {:ok, _} <- GPGInterface.import_key(secret),
-         {:ok, _} <- GPGInterface.import_trustdb(trust) do
-      IO.puts("Imported key #{fingerprint}")
-    else
-      {:error, {_, msg}} ->
-        IO.puts("Import failed: #{msg}")
-    end
   end
 
   @spec get_passphrase(String.t()) :: String.t()

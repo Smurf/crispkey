@@ -174,11 +174,6 @@ Sync Commands:
   discover [sec]    Find devices on network
   pair <id|host>    Pair with a device
   sync [device]     Sync vaults with device(s)
-
-Legacy Commands:
-  export <fp>       Export key (armored)
-  wrap <fp>         Export wrapped key
-  unwrap <file>     Import wrapped key
 ```
 
 ## Network Ports

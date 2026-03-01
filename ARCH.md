@@ -47,8 +47,6 @@ crispkey/
 │   ├── application.ex           # OTP application supervisor
 │   ├── crispkey.ex              # Core module (device_id, config access)
 │   ├── cli.ex                   # CLI command dispatcher
-│   ├── crypto/
-│   │   └── key_wrapper.ex       # Legacy key wrapping (standalone encryption)
 │   ├── gpg/
 │   │   ├── interface.ex         # GPG CLI wrapper
 │   │   └── types.ex             # Key, UID, Subkey structs
@@ -215,11 +213,6 @@ crispkey daemon            # Start background sync daemon
 crispkey discover [sec]    # Find devices on network
 crispkey pair <id|host>    # Pair with a device
 crispkey sync [device]     # Sync vaults with device(s)
-
-# Legacy Commands
-crispkey export <fp>       # Export key (armored)
-crispkey wrap <fp>         # Export wrapped key
-crispkey unwrap <file>     # Import wrapped key
 ```
 
 ### Environment Variables

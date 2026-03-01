@@ -12,6 +12,8 @@ services:
     hostname: alice
     userns_mode: keep-id
     user: testuser
+    environment:
+      - CRISPKEY_MASTER_PASSWORD=testmaster123
     networks:
       - crispkey-test
     volumes:
@@ -31,6 +33,8 @@ services:
     hostname: bob
     userns_mode: keep-id
     user: testuser
+    environment:
+      - CRISPKEY_MASTER_PASSWORD=testmaster123
     networks:
       - crispkey-test
     volumes:

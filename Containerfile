@@ -6,9 +6,6 @@ FROM docker.io/elixir:1.15-alpine AS builder
 
 WORKDIR /build
 
-# Install build dependencies
-RUN apk add --no-cache git
-
 # Copy mix.exs and fetch dependencies first (layer caching)
 COPY mix.exs mix.lock ./
 RUN mix local.hex --force && \

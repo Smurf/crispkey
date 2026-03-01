@@ -1,13 +1,14 @@
 # crispkey
 
-GPG key synchronization across devices using peer-to-peer discovery and sync.
+GPG key synchronization across devices using encrypted vaults and peer-to-peer sync.
 
 ## Features
 
+- **Encrypted Vaults**: Keys stored in individually encrypted vault files
+- **Separate Passwords**: Master password for vaults, sync password for authentication
+- **Encrypted Transport**: All sync communication encrypted with session keys
 - **P2P Discovery**: Find other devices on your local network via UDP multicast
-- **Secure Key Wrapping**: Export keys encrypted with PBKDF2 + AES-256-GCM
-- **Trust Database Sync**: Syncs GPG keys and ownertrust
-- **Daemon Mode**: Background service for automatic discovery and sync
+- **Incremental Sync**: Only transfer changed vaults
 
 ## Installation
 
@@ -22,289 +23,207 @@ mix escript.build
 ### System-wide Install
 
 ```bash
-# Build and install to /usr/local/bin
 ./install.sh
 ```
-
-This also installs a systemd user service. See [Running as a Service](#running-as-a-service).
 
 ## Quick Start
 
 ```bash
-# Initialize crispkey with a master passphrase
+# Initialize vault system
 ./crispkey init
 
-# List your GPG keys
-./crispkey keys
+# Unlock vaults for operations
+./crispkey unlock
 
-# Export a wrapped (encrypted) key for backup or transfer
-./crispkey wrap <fingerprint>
+# Import your GPG keys to vaults
+./crispkey vault import <fingerprint>
 
-# Import a wrapped key
-./crispkey unwrap crispkey_<fingerprint>.wrapped
+# List vaults
+./crispkey vault list
+```
+
+## Security Model
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Master Password → PBKDF2(600k iter) → Master Key           │
+│                         │                                   │
+│                         ▼                                   │
+│              Vault Key (per vault via HKDF)                 │
+│                         │                                   │
+│                         ▼                                   │
+│              AES-256-GCM Encrypted Vault                    │
+├─────────────────────────────────────────────────────────────┤
+│  Sync Password → HKDF(session_id) → Session Key             │
+│                         │                                   │
+│                         ▼                                   │
+│              AES-256-GCM Encrypted Transport                │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Key Benefits:**
+- Vaults remain encrypted during sync (no re-encryption)
+- Compromised sync password doesn't expose vault contents
+- Each vault uses a unique derived key
+
+## Vault Commands
+
+```bash
+# Initialize vault system (set master + sync passwords)
+crispkey init
+
+# Unlock vaults with master password
+crispkey unlock
+
+# Lock vaults (clear master key from memory)
+crispkey lock
+
+# List vaults
+crispkey vault list
+
+# Import GPG key to vault
+crispkey vault import <fingerprint>
+
+# Export vault to GPG keyring
+crispkey vault export <fingerprint>
+
+# Delete a vault
+crispkey vault delete <fingerprint>
+```
+
+## Sync Commands
+
+```bash
+# Discover devices on network
+crispkey discover
+
+# Pair with a device
+crispkey pair <device_id|ip>
+
+# Sync vaults with paired device
+crispkey sync [device_id]
 ```
 
 ## Discovery & Sync
 
 ### How It Works
 
-crispkey uses UDP multicast for peer discovery:
-
-1. **Daemon** (`crispkey daemon`) runs on each device, listening on port 4830
-2. **Discoverer** sends a multicast announcement to `224.0.0.251:4830`
-3. All daemons on the network receive the announcement and respond with their device info
-4. The discoverer collects responses and displays available peers
+1. **Daemon** runs on each device, listening for discovery and sync
+2. **Discover** sends multicast announcement to find peers
+3. **Pair** exchanges device IDs for trust establishment
+4. **Sync** exchanges manifests and transfers encrypted vaults
 
 ```
 ┌─────────────┐                    ┌─────────────┐
 │  Device A   │                    │  Device B   │
 │             │                    │             │
 │  daemon ────┼──── multicast ────►│  daemon     │
-│             │                    │  (responds) │
-│             │◄──── unicast ──────┤             │
-│  discover   │                    │             │
+│             │◄──── response ─────┤             │
+│             │                    │             │
+│  unlock     │                    │  unlock     │
+│  sync ──────┼── encrypted channel─┼─► receive  │
+│             │                    │  vaults     │
 └─────────────┘                    └─────────────┘
 ```
 
 ### Starting the Daemon
 
-On each device you want to sync with:
+```bash
+crispkey daemon
+```
+
+For production, run as a systemd service:
 
 ```bash
-./crispkey daemon
-```
-
-Output:
-```
-Starting crispkey daemon...
-Device ID: d60d84530ad8ab5b
-Listening for discovery on port 4830
-Listening for sync on port 4829
-Press Ctrl+C to stop
-```
-
-For production use, run as a systemd service or background process:
-
-```bash
-# Run in background
-nohup ./crispkey daemon > /var/log/crispkey.log 2>&1 &
-```
-
-### Running as a Service
-
-crispkey includes a systemd user service for automatic startup.
-
-**Install the service:**
-
-```bash
-# Build and install
-./install.sh
-
-# Or manually:
-mkdir -p ~/.config/systemd/user
-cp contrib/crispkey.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-```
-
-**Manage the service:**
-
-```bash
-# Start now
-systemctl --user start crispkey
-
-# Enable at login
 systemctl --user enable crispkey
-
-# Check status
-systemctl --user status crispkey
-
-# View logs
-journalctl --user -u crispkey -f
+systemctl --user start crispkey
 ```
 
-**Linger for headless servers:**
+## Data Storage
 
-To keep the service running when you're not logged in:
-
-```bash
-sudo loginctl enable-linger $USER
 ```
-
-### Discovering Peers
-
-From any device on the same network:
-
-```bash
-./crispkey discover
-```
-
-Output:
-```
-Discovering devices (5s)...
-Make sure 'crispkey daemon' is running on other devices.
-Found 2 device(s):
-  a1b2c3d4e5f6g7h8 @ 192.168.1.100:4829
-  i9j0k1l2m3n4o5p6 @ 192.168.1.101:4829
-```
-
-Specify a custom timeout (in seconds):
-
-```bash
-./crispkey discover 10
-```
-
-### Pairing Devices
-
-After discovering peers, pair with them by device ID or IP address:
-
-**By device ID (recommended):**
-
-```bash
-./crispkey pair a1b2c3d4e5f6g7h8
-```
-
-**By IP address:**
-
-```bash
-./crispkey pair 192.168.1.100
-```
-
-Output:
-```
-Pairing with 192.168.1.100...
-Connected to peer
-Paired successfully
-```
-
-### Syncing Keys
-
-Sync with all paired devices:
-
-```bash
-./crispkey sync
-```
-
-Or sync with a specific device:
-
-```bash
-./crispkey sync d60d84530ad8ab5b
+~/.config/crispkey/
+├── vaults/
+│   ├── abc123...def.vault    # Encrypted GPG key
+│   └── xyz789...uvw.vault
+├── manifest.enc              # Encrypted vault index
+├── master_salt               # Salt for master key derivation
+├── device_id
+└── state.json                # Paired devices, sync history
 ```
 
 ## Command Reference
 
 ```
-crispkey - GPG key synchronization
+crispkey - GPG key synchronization with encrypted vaults
 
-Usage:
-  crispkey init              Initialize crispkey
-  crispkey status            Show sync status
-  crispkey keys              List local GPG keys
-  crispkey devices           List paired devices
-  crispkey daemon            Start background sync daemon
-  crispkey discover [sec]    Find devices on network
-  crispkey pair <id|host>    Pair with a device (by ID or IP)
-  crispkey sync [device]     Sync keys with device(s)
-  crispkey export <fp>       Export key (armored)
-  crispkey wrap <fp>         Export wrapped (encrypted) key
-  crispkey unwrap <file>     Import wrapped key
+Vault Commands:
+  init              Initialize vault system
+  unlock            Unlock vaults with master password
+  lock              Lock vaults
+  vault list        List vaults
+  vault import <fp> Import GPG key to vault
+  vault export <fp> Export vault to GPG keyring
+  vault delete <fp> Delete a vault
+
+Sync Commands:
+  status            Show sync status
+  keys              List GPG keys in keyring
+  devices           List paired devices
+  daemon            Start background sync daemon
+  discover [sec]    Find devices on network
+  pair <id|host>    Pair with a device
+  sync [device]     Sync vaults with device(s)
 ```
-
-## Key Wrapping
-
-### Export (Wrap)
-
-Create an encrypted backup of a key:
-
-```bash
-./crispkey wrap ABC123DEF456...
-```
-
-This creates `crispkey_ABC123DEF456....wrapped` containing:
-- Public key
-- Secret key
-- Trust database
-- Key fingerprint
-
-The file is encrypted with AES-256-GCM using a key derived from your passphrase via PBKDF2 (600,000 iterations).
-
-### Import (Unwrap)
-
-Import a wrapped key:
-
-```bash
-./crispkey unwrap crispkey_ABC123DEF456....wrapped
-```
-
-You'll be prompted for the wrapping passphrase.
 
 ## Network Ports
 
 | Port | Protocol | Purpose |
 |------|----------|---------|
-| 4829 | TCP | Sync protocol (key exchange) |
+| 4829 | TCP | Sync protocol (encrypted) |
 | 4830 | UDP | Discovery (multicast) |
 
-Ensure these ports are open on your firewall for local network communication.
+## Security Properties
 
-## Multicast Address
-
-Discovery uses multicast address `224.0.0.251` (link-local multicast). This should work on most local networks without special configuration.
-
-## Data Storage
-
-crispkey stores data in:
-
-```
-~/.config/crispkey/
-├── device_id      # Unique device identifier
-└── state.json     # Paired devices, sync history
-```
-
-GPG keys remain in the standard `~/.gnupg` directory.
-
-## Security
-
-- **Key Wrapping**: Uses PBKDF2 (600k iterations) + AES-256-GCM
-- **Passphrase**: Never stored; derived key cached only in memory
-- **Transport**: Sync traffic is encrypted with per-session keys
-- **Self-Discovery Prevention**: Device ignores its own discovery announcements
-- **Type Safety**: All wire protocol messages use typed structs with safe atomization to prevent DoS attacks
+| Threat | Protection |
+|--------|------------|
+| Vault file stolen | Encrypted with master key (PBKDF2 600k iter) |
+| Sync traffic intercepted | Encrypted with session key |
+| Sync password compromised | Can sync, but can't read vaults |
+| Master password compromised | Can read vaults, but can't impersonate for sync |
+| One vault compromised | Others use different HKDF-derived keys |
 
 ## Troubleshooting
+
+### Vaults locked error
+
+Unlock vaults before operations:
+
+```bash
+crispkey unlock
+```
+
+### Sync authentication failed
+
+Ensure you're using the *remote* device's sync password:
+
+```bash
+crispkey sync
+# Enter remote device's sync password: (the OTHER node's password)
+```
 
 ### No devices found
 
 1. Ensure `crispkey daemon` is running on other devices
 2. Check firewall allows UDP port 4830
-3. Verify devices are on the same network segment (multicast may not route)
-
-### Port already in use
-
-If port 4829/4830 are in use, configure different ports in `config/config.exs`:
-
-```elixir
-config :crispkey,
-  sync_port: 4831,
-  discovery_port: 4832
-```
+3. Verify devices are on the same network segment
 
 ## Development
 
 ```bash
-# Get dependencies
 mix deps.get
-
-# Build escript
 mix escript.build
-
-# Run type checking
-mix dialyzer
-
-# Run code quality checks
-mix credo
-
-# Run tests
-mix test
+mix compile --warnings-as-errors
 ```
 
 ## License

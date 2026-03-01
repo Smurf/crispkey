@@ -18,7 +18,7 @@ run_test() {
     local script=$2
     
     log "=== Running $name ==="
-    if "$SCRIPT_DIR/$script"; then
+    if "$SCRIPT_DIR/$script" NOBUILD; then
         log "=== $name: PASSED ==="
         return 0
     else
@@ -26,11 +26,10 @@ run_test() {
         return 1
     fi
 }
-
 main() {
     log "Starting full test suite..."
     log "======================================"
-    
+    $SCRIPT_DIR/rebuild-containers.sh
     local failures=0
     
     if ! run_test "Setup" "test-setup.sh"; then

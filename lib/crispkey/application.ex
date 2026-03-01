@@ -11,7 +11,8 @@ defmodule Crispkey.Application do
     configure_runtime()
 
     children = [
-      Crispkey.Store.LocalState
+      Crispkey.Store.LocalState,
+      Crispkey.Vault.Manager
     ]
 
     opts = [strategy: :one_for_one, name: Crispkey.Supervisor]

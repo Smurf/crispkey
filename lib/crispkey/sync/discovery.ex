@@ -7,10 +7,17 @@ defmodule Crispkey.Sync.Discovery do
   @discovery_port 4830
   @service_name "_crispkey._tcp.local"
 
+  require Logger
+
   @type discovered_peer :: %{
           id: String.t(),
           port: non_neg_integer(),
           ip: String.t()
+        }
+
+  @type partial_peer :: %{
+          id: String.t(),
+          port: non_neg_integer()
         }
 
   @spec discover(non_neg_integer()) :: [discovered_peer()]
@@ -23,7 +30,11 @@ defmodule Crispkey.Sync.Discovery do
       ])
 
     msg = encode_announcement()
-    :gen_udp.send(socket, @multicast_addr, @discovery_port, msg)
+
+    case :gen_udp.send(socket, @multicast_addr, @discovery_port, msg) do
+      :ok -> :ok
+      {:error, reason} -> Logger.error("Failed to send discovery: #{inspect(reason)}")
+    end
 
     peers = collect_responses(socket, timeout_ms, %{})
 
@@ -46,27 +57,35 @@ defmodule Crispkey.Sync.Discovery do
     if remaining <= 0 do
       peers
     else
-      case :gen_udp.recv(socket, 0, min(remaining, 500)) do
-        {:ok, {ip, _port, data}} ->
-          case parse_announcement(data) do
-            {:ok, peer} ->
-              if peer.id != Crispkey.device_id() do
-                peer = Map.put(peer, :ip, format_ip(ip))
-                do_collect(socket, start, timeout_ms, Map.put(peers, peer.id, peer))
-              else
-                do_collect(socket, start, timeout_ms, peers)
-              end
+      collect_next_peer(socket, start, timeout_ms, remaining, peers)
+    end
+  end
 
-            :error ->
-              do_collect(socket, start, timeout_ms, peers)
-          end
+  defp collect_next_peer(socket, start, timeout_ms, remaining, peers) do
+    case :gen_udp.recv(socket, 0, min(remaining, 500)) do
+      {:ok, {ip, _port, data}} ->
+        handle_peer_data(socket, start, timeout_ms, peers, ip, data)
 
-        {:error, :timeout} ->
+      {:error, :timeout} ->
+        do_collect(socket, start, timeout_ms, peers)
+
+      {:error, _} ->
+        peers
+    end
+  end
+
+  defp handle_peer_data(socket, start, timeout_ms, peers, ip, data) do
+    case parse_announcement(data) do
+      {:ok, peer} ->
+        if peer.id != Crispkey.device_id() do
+          peer = Map.put(peer, :ip, format_ip(ip))
+          do_collect(socket, start, timeout_ms, Map.put(peers, peer.id, peer))
+        else
           do_collect(socket, start, timeout_ms, peers)
+        end
 
-        {:error, _} ->
-          peers
-      end
+      _ ->
+        do_collect(socket, start, timeout_ms, peers)
     end
   end
 
@@ -83,15 +102,25 @@ defmodule Crispkey.Sync.Discovery do
     |> Jason.encode!()
   end
 
-  @spec parse_announcement(binary()) :: {:ok, discovered_peer()} | :error
+  @spec parse_announcement(binary()) :: {:ok, partial_peer()} | :error
   defp parse_announcement(data) do
-    with {:ok, msg} <- Jason.decode(data),
-         true <- Map.get(msg, "service") == @service_name,
-         id when is_binary(id) <- Map.get(msg, "id"),
-         port when is_integer(port) <- Map.get(msg, "port") do
-      {:ok, %{id: id, port: port}}
-    else
-      _ -> :error
+    case Jason.decode(data) do
+      {:ok, msg} ->
+        if Map.get(msg, "service") == @service_name do
+          id = Map.get(msg, "id")
+          port = Map.get(msg, "port")
+
+          if is_binary(id) and is_integer(port) do
+            {:ok, %{id: id, port: port}}
+          else
+            :error
+          end
+        else
+          :error
+        end
+
+      {:error, _} ->
+        :error
     end
   end
 end

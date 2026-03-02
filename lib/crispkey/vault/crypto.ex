@@ -309,7 +309,14 @@ defmodule Crispkey.Vault.Crypto do
           pkg.encrypted_master_key
 
         _ ->
-          :crypto.exor(fido2_signature, pkg.wrapped_dek)
+          sig_part =
+            binary_part(
+              fido2_signature,
+              0,
+              min(byte_size(fido2_signature), byte_size(pkg.wrapped_dek))
+            )
+
+          :crypto.exor(sig_part, pkg.wrapped_dek)
       end
 
     unwrap_master_key(pkg.encrypted_master_key, pkg.nonce, pkg.tag, dek)

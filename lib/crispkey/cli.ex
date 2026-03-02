@@ -11,8 +11,10 @@ defmodule Crispkey.CLI do
 
   @spec main([String.t()]) :: no_return()
   def main(args) do
+    IO.puts(:stderr, "DEBUG main: starting crispkey CLI")
     configure_runtime()
     {:ok, _} = Application.ensure_all_started(:crispkey)
+    IO.puts(:stderr, "DEBUG main: application started")
 
     case args do
       ["help" | _] -> help()
@@ -197,29 +199,37 @@ defmodule Crispkey.CLI do
 
   @spec unlock() :: no_return()
   defp unlock do
+    IO.puts(:stderr, "DEBUG unlock: starting unlock function")
+
     if Manager.unlocked?() do
       IO.puts("Vaults already unlocked")
       System.halt(0)
     end
 
     yubikey_only = Store.LocalState.yubikey_only?()
+    IO.puts("DEBUG unlock: yubikey_only: #{inspect(yubikey_only)}")
 
     cond do
       yubikey_only ->
         IO.puts("This vault requires YubiKey authentication.")
+        IO.puts("DEBUG unlock: calling yubikey_unlock because yubikey_only is true")
         yubikey_unlock()
 
       Manager.yubikey_enrolled?() ->
+        IO.puts("DEBUG unlock: yubikey_enrolled? is true")
         IO.puts("YubiKey available. Press Enter to use YubiKey, or enter password.")
         password = IO.gets("Password or Enter for YubiKey: ") |> String.trim()
 
         if password == "" do
+          IO.puts("DEBUG unlock: user pressed enter, trying YubiKey")
+
           case Manager.unlock_with_yubikey() do
             :ok ->
               IO.puts("Vaults unlocked with YubiKey")
               System.halt(0)
 
             {:error, reason} ->
+              IO.puts("DEBUG unlock: unlock_with_yubikey failed: #{inspect(reason)}")
               IO.puts("YubiKey unlock failed: #{inspect(reason)}")
               IO.puts("Trying password...")
           end
@@ -228,6 +238,7 @@ defmodule Crispkey.CLI do
         end
 
       true ->
+        IO.puts("DEBUG unlock: no YubiKey enrolled, asking for password")
         password = get_passphrase("Enter master password: ")
         unlock_with_password(password)
     end
@@ -335,6 +346,8 @@ defmodule Crispkey.CLI do
       System.halt(0)
     end
 
+    IO.puts("DEBUG: yubikey_enrolled?: #{inspect(Manager.yubikey_enrolled?())}")
+
     unless Manager.yubikey_enrolled?() do
       IO.puts("Error: No YubiKey enrolled. Run 'crispkey yubikey enroll' first.")
       System.halt(1)
@@ -342,7 +355,9 @@ defmodule Crispkey.CLI do
 
     IO.puts("Touch your YubiKey to unlock vaults...")
 
-    case Manager.unlock_with_yubikey() do
+    IO.puts("DEBUG: Calling Manager.unlock_with_yubikey()...")
+
+    case GenServer.call(Manager, :unlock_with_yubikey, 30_000) do
       :ok ->
         IO.puts("Vaults unlocked with YubiKey")
         System.halt(0)
@@ -356,6 +371,7 @@ defmodule Crispkey.CLI do
         System.halt(1)
 
       {:error, reason} ->
+        IO.puts("DEBUG: unlock_with_yubikey result: #{inspect(reason)}")
         IO.puts("Error: #{inspect(reason)}")
         System.halt(1)
     end

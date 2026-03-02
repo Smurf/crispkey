@@ -241,13 +241,22 @@ defmodule Crispkey.Vault.Manager do
 
   @impl true
   def handle_call({:unlock, password}, _from, state) do
+    IO.puts(
+      "DEBUG handle_call(:unlock) - yubikey_only: #{state.yubikey_only}, auth_methods: #{inspect(state.auth_methods)}"
+    )
+
     cond do
       state.yubikey_only ->
+        IO.puts("DEBUG handle_call(:unlock) - yubikey_only is true, returning error")
         {:reply, {:error, :yubikey_only}, state}
 
       :yubikey in state.auth_methods ->
+        IO.puts("DEBUG handle_call(:unlock) - yubikey in auth_methods, trying yubikey")
+
         case do_unlock_with_yubikey() do
           {:ok, master_key, manifest} ->
+            IO.puts("DEBUG handle_call(:unlock) - yubikey unlock succeeded")
+
             {:reply, :ok,
              %{
                state
@@ -258,11 +267,16 @@ defmodule Crispkey.Vault.Manager do
                  auth_method: :yubikey
              }}
 
-          {:error, _} ->
+          {:error, reason} ->
+            IO.puts(
+              "DEBUG handle_call(:unlock) - yubikey unlock failed: #{inspect(reason)}, trying password"
+            )
+
             unlock_with_password(password, state)
         end
 
       true ->
+        IO.puts("DEBUG handle_call(:unlock) - no yubikey in auth_methods, trying password")
         unlock_with_password(password, state)
     end
   end
@@ -335,7 +349,9 @@ defmodule Crispkey.Vault.Manager do
   end
 
   def handle_call(:unlock_with_yubikey, _from, state) do
+    IO.puts("DEBUG: handle_call(:unlock_with_yubikey) - yubikey_only: #{state.yubikey_only}")
     result = do_unlock_with_yubikey()
+    IO.puts("DEBUG: unlock_with_yubikey result: #{inspect(result)}")
 
     case result do
       {:ok, master_key, manifest} ->
@@ -350,9 +366,11 @@ defmodule Crispkey.Vault.Manager do
          }}
 
       {:error, _} when state.yubikey_only ->
+        IO.puts("DEBUG: Returning yubikey_required error")
         {:reply, {:error, :yubikey_required}, state}
 
       {:error, _} ->
+        IO.puts("DEBUG: Returning yubikey_failed error")
         {:reply, {:error, :yubikey_failed}, state}
     end
   end
@@ -750,7 +768,11 @@ defmodule Crispkey.Vault.Manager do
   defp create_wrapped_package(master_key, dek, fido2_signature, salt, credential_id) do
     {encrypted_master_key, nonce, tag} = Crypto.wrap_master_key(master_key, dek)
     dek_key = Crypto.hkdf_derive(dek, "crispkey-fido2", 32)
-    wrapped_dek = :crypto.exor(fido2_signature, dek_key)
+
+    sig_part =
+      binary_part(fido2_signature, 0, min(byte_size(fido2_signature), byte_size(dek_key)))
+
+    wrapped_dek = :crypto.exor(sig_part, dek_key)
 
     %WrappedKeyPackage{
       encrypted_master_key: encrypted_master_key,
@@ -764,9 +786,9 @@ defmodule Crispkey.Vault.Manager do
 
   @spec save_wrapped_package!(WrappedKeyPackage.t()) :: :ok
   defp save_wrapped_package!(%WrappedKeyPackage{} = pkg) do
-    cred_id_b64 = Base.encode64(pkg.credential_id)
-    path = Path.join([wrapped_keys_dir(), "#{cred_id_b64}.enc"])
+    cred_id_b64 = Base.encode64(pkg.credential_id) |> String.replace("/", "_", global: true)
     File.mkdir_p!(wrapped_keys_dir())
+    path = Path.join([wrapped_keys_dir(), "#{cred_id_b64}.enc"])
 
     data = %{
       "encrypted_master_key" => Base.encode64(pkg.encrypted_master_key),
@@ -782,14 +804,19 @@ defmodule Crispkey.Vault.Manager do
 
   @spec wrapped_keys_dir() :: String.t()
   defp do_unlock_with_yubikey do
+    IO.puts("DEBUG: do_unlock_with_yubikey - calling get_wrapped_keys")
+
     case FIDO2Client.get_wrapped_keys() do
       {:ok, wrapped_keys} ->
+        IO.puts("DEBUG: got #{length(wrapped_keys)} wrapped keys")
         try_unlock_with_keys(wrapped_keys)
 
       {:error, :not_enrolled} ->
+        IO.puts("DEBUG: not_enrolled")
         {:error, :not_enrolled}
 
       error ->
+        IO.puts("DEBUG: get_wrapped_keys error: #{inspect(error)}")
         error
     end
   end
@@ -801,10 +828,16 @@ defmodule Crispkey.Vault.Manager do
   end
 
   defp try_unlock_with_keys([wrapped_key | rest]) do
+    IO.puts("DEBUG: try_unlock_with_keys - attempting authentication")
+
     case load_wrapped_package(wrapped_key.credential_id) do
       {:ok, pkg} ->
+        IO.puts("DEBUG: loaded wrapped package, calling FIDO2Client.authenticate")
+
         case FIDO2Client.authenticate(wrapped_key, pkg.encrypted_master_key) do
-          {:ok, _assertion} ->
+          {:ok, assertion} ->
+            IO.puts("DEBUG: Authentication succeeded, assertion: #{inspect(assertion)}")
+
             case Crypto.unwrap_with_fido2(
                    %{
                      encrypted_master_key: pkg.encrypted_master_key,
@@ -812,10 +845,11 @@ defmodule Crispkey.Vault.Manager do
                      tag: pkg.tag,
                      wrapped_dek: pkg.wrapped_dek
                    },
-                   pkg.wrapped_dek,
+                   assertion.signature,
                    wrapped_key.public_key
                  ) do
               {:ok, master_key} ->
+                IO.puts("DEBUG: unwrap_with_fido2 succeeded")
                 salt = pkg.salt
 
                 case load_manifest_encrypted(master_key, salt) do
@@ -824,14 +858,17 @@ defmodule Crispkey.Vault.Manager do
                 end
 
               error ->
+                IO.puts("DEBUG: unwrap_with_fido2 failed: #{inspect(error)}")
                 try_unlock_with_keys(rest)
             end
 
-          _ ->
+          error ->
+            IO.puts("DEBUG: FIDO2Client.authenticate failed: #{inspect(error)}")
             try_unlock_with_keys(rest)
         end
 
-      {:error, _} ->
+      {:error, reason} ->
+        IO.puts("DEBUG: load_wrapped_package failed: #{inspect(reason)}")
         try_unlock_with_keys(rest)
     end
   end
@@ -843,38 +880,67 @@ defmodule Crispkey.Vault.Manager do
 
   @spec load_wrapped_package(binary()) :: {:ok, WrappedKeyPackage.t()} | {:error, :not_found}
   defp load_wrapped_package(credential_id) do
-    cred_id_b64 = Base.encode64(credential_id)
-    path = Path.join([wrapped_keys_dir(), "#{cred_id_b64}.enc"])
+    # credential_id in WrappedKey is stored as Base64 string, not decoded
+    # We need to compare the strings directly, not decode
+    IO.puts("DEBUG: load_wrapped_package - credential_id (raw): #{inspect(credential_id)}")
 
-    case File.read(path) do
-      {:ok, data} ->
-        {:ok, json} = Jason.decode(data)
+    IO.puts(
+      "DEBUG: load_wrapped_package - files in dir: #{inspect(wrapped_keys_dir() |> File.ls!())}"
+    )
 
-        {:ok,
-         %WrappedKeyPackage{
-           encrypted_master_key: Base.decode64!(json["encrypted_master_key"]),
-           nonce: Base.decode64!(json["nonce"]),
-           tag: Base.decode64!(json["tag"]),
-           wrapped_dek: Base.decode64!(json["wrapped_dek"]),
-           salt: Base.decode64!(json["salt"]),
-           credential_id: Base.decode64!(json["credential_id"])
-         }}
+    # Find the file by matching the Base64 string directly
+    found_file =
+      Enum.find_value(wrapped_keys_dir() |> File.ls!(), fn filename ->
+        base64_part = String.replace_trailing(filename, ".enc", "")
+        IO.puts("DEBUG: load_wrapped_package - checking file: #{base64_part}")
+        IO.puts("DEBUG: load_wrapped_package - match? #{base64_part == credential_id}")
+        if base64_part == credential_id, do: filename
+      end)
 
-      {:error, :enoent} ->
+    case found_file do
+      nil ->
+        IO.puts("DEBUG: load_wrapped_package - no matching file found, trying legacy")
         load_wrapped_package_legacy(credential_id)
 
-      {:error, reason} ->
-        {:error, reason}
+      filename ->
+        path = Path.join([wrapped_keys_dir(), filename])
+        IO.puts("DEBUG: load_wrapped_package found file: #{path}")
+
+        case File.read(path) do
+          {:ok, data} ->
+            IO.puts("DEBUG: load_wrapped_package succeeded")
+            {:ok, json} = Jason.decode(data)
+
+            {:ok,
+             %WrappedKeyPackage{
+               encrypted_master_key: Base.decode64!(json["encrypted_master_key"]),
+               nonce: Base.decode64!(json["nonce"]),
+               tag: Base.decode64!(json["tag"]),
+               wrapped_dek: Base.decode64!(json["wrapped_dek"]),
+               salt: Base.decode64!(json["salt"]),
+               credential_id: Base.decode64!(json["credential_id"])
+             }}
+
+          {:error, :enoent} ->
+            load_wrapped_package_legacy(credential_id)
+
+          {:error, reason} ->
+            {:error, reason}
+        end
     end
   end
 
   @spec load_wrapped_package_legacy(binary()) ::
           {:ok, WrappedKeyPackage.t()} | {:error, :not_found}
   defp load_wrapped_package_legacy(_credential_id) do
+    IO.puts("DEBUG: load_wrapped_package_legacy - trying legacy path")
     path = Path.join(Crispkey.data_dir(), "wrapped_key.enc")
+    IO.puts("DEBUG: load_wrapped_package_legacy path: #{path}")
+    IO.puts("DEBUG: load_wrapped_package_legacy file exists?: #{File.exists?(path)}")
 
     case File.read(path) do
       {:ok, data} ->
+        IO.puts("DEBUG: load_wrapped_package_legacy succeeded")
         {:ok, json} = Jason.decode(data)
 
         {:ok,
@@ -888,9 +954,11 @@ defmodule Crispkey.Vault.Manager do
          }}
 
       {:error, :enoent} ->
+        IO.puts("DEBUG: load_wrapped_package_legacy file not found")
         {:error, :not_found}
 
       {:error, reason} ->
+        IO.puts("DEBUG: load_wrapped_package_legacy error: #{inspect(reason)}")
         {:error, reason}
     end
   end

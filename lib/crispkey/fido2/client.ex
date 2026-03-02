@@ -6,10 +6,9 @@ defmodule Crispkey.FIDO2.Client do
   vault unlocking.
   """
 
-  alias Crispkey.FIDO2.{Bindings, Types}
+  alias Crispkey.FIDO2.{Bindings, Port, Types}
 
   @rp_id "crispkey"
-  @rp_name "Crispkey Vault"
 
   @spec available?() :: boolean()
   def available?, do: Bindings.available?()
@@ -49,124 +48,19 @@ defmodule Crispkey.FIDO2.Client do
 
   defp do_enroll(pin) do
     challenge = :crypto.strong_rand_bytes(32)
-
-    client_data_hash =
-      :crypto.hash(
-        :sha256,
-        Jason.encode!(%{
-          type: "webauthn.create",
-          challenge: Base.url_encode64(challenge, padding: false),
-          origin: "crispkey://localhost"
-        })
-      )
-
-    encoded_chdh = Base.encode64(client_data_hash)
     user_id = :crypto.strong_rand_bytes(16)
-    encoded_user_id = Base.encode64(user_id)
 
-    device = find_fido_device()
-
-    input = "#{encoded_chdh}\n#{@rp_id}\ncrispkey\n#{encoded_user_id}\n"
-
-    temp_input = Path.join(System.tmp_dir!(), "crispkey_cred_in_#{:rand.uniform(1_000_000)}")
-    temp_output = Path.join(System.tmp_dir!(), "crispkey_cred_out_#{:rand.uniform(1_000_000)}")
-
-    try do
-      File.write!(temp_input, input)
-
-      result = run_fido2_cred_with_pin(pin, temp_input, temp_output, device)
-
-      case result do
-        {output, 0} ->
-          parse_enrollment_response_file(temp_output)
-
-        {error, code} when code > 0 ->
-          {:error, {:enrollment_failed, error}}
-
-        {output, _} ->
-          {:error, {:enrollment_failed, output}}
-      end
-    after
-      File.rm(temp_input)
-      File.rm(temp_output)
-    end
-  end
-
-  defp find_fido_device do
-    case System.cmd("fido2-token", ["-L"]) do
-      {output, 0} ->
-        case String.split(output, "\n", trim: true) do
-          [device | _] ->
-            case String.split(device, ":", parts: 2) do
-              [path, _] -> String.trim(path)
-              _ -> device
-            end
-
-          [] ->
-            "/dev/hidraw0"
-        end
-
-      _ ->
-        "/dev/hidraw0"
-    end
-  end
-
-  defp prompt_pin do
-    IO.gets("Enter YubiKey PIN: ") |> String.trim()
-  end
-
-  defp run_fido2_cred_with_pin(pin, temp_input, temp_output, device) do
-    cmd =
-      "printf '%s' '#{pin}' | fido2-cred -M -i #{temp_input} -o #{temp_output} #{device} es256 2>&1"
-
-    result = :os.cmd(String.to_charlist(cmd))
-    output = List.to_string(result)
-
-    if String.contains?(output, "credentialId:") or String.contains?(output, "publicKey:") do
-      {output, 0}
-    else
-      {output, 1}
-    end
-  end
-
-  defp parse_enrollment_response(output) do
-    lines = String.split(output, "\n", trim: true)
-
-    credential_id =
-      lines
-      |> Enum.find(&String.starts_with?(&1, "credentialId: "))
-      |> case do
-        nil -> <<>>
-        line -> line |> String.replace("credentialId: ", "") |> Base.decode64!()
-      end
-
-    public_key =
-      lines
-      |> Enum.find(&String.starts_with?(&1, "publicKey: "))
-      |> case do
-        nil -> <<>>
-        line -> line |> String.replace("publicKey: ", "") |> Base.decode64!()
-      end
-
-    if credential_id != <<>> and public_key != <<>> do
-      {:ok,
-       %Types.WrappedKey{
-         credential_id: credential_id,
-         public_key: public_key,
-         rp_id: @rp_id
-       }}
-    else
-      {:error, :enrollment_parse_failed}
-    end
-  end
-
-  defp parse_enrollment_response_file(output_path) do
-    case File.read(output_path) do
-      {:ok, output} ->
-        parse_enrollment_response(output)
+    case Port.enroll(pin, user_id, challenge) do
+      {:ok, result} ->
+        {:ok,
+         %Types.WrappedKey{
+           credential_id: result.credential_id,
+           public_key: result.public_key,
+           rp_id: result.rp_id
+         }}
 
       {:error, reason} ->
-        {:error, {:enrollment_parse_failed, reason}}
+        {:error, {:enrollment_failed, reason}}
     end
   end
 
@@ -181,14 +75,23 @@ defmodule Crispkey.FIDO2.Client do
           | {:error, :user_not_present | :user_verification_failed | term()}
   def authenticate(%Types.WrappedKey{} = wrapped_key, challenge)
       when is_binary(challenge) do
+    IO.puts("DEBUG: FIDO2Client.authenticate - available?: #{inspect(available?())}")
+
+    IO.puts(
+      "DEBUG: FIDO2Client.authenticate - challenge length: #{byte_size(challenge)}, cred_id length: #{byte_size(wrapped_key.credential_id)}"
+    )
+
     if available?() do
       do_authenticate(wrapped_key, challenge)
     else
+      IO.puts("DEBUG: FIDO2Client.authenticate - not available")
       {:error, :not_available}
     end
   end
 
   defp do_authenticate(wrapped_key, challenge) do
+    IO.puts("DEBUG: do_authenticate - calling Bindings.generate_assertion")
+
     opts = %{
       challenge: challenge,
       credential_id: wrapped_key.credential_id,
@@ -225,10 +128,20 @@ defmodule Crispkey.FIDO2.Client do
   """
   @spec list_enrolled() :: {:ok, [Types.WrappedKey.t()]} | {:error, term()}
   def list_enrolled do
+    IO.puts("DEBUG: list_enrolled - calling load_wrapped_keys")
+
     case load_wrapped_keys() do
-      {:ok, keys} -> {:ok, keys}
-      {:error, :not_found} -> {:ok, []}
-      error -> error
+      {:ok, keys} ->
+        IO.puts("DEBUG: list_enrolled - got #{length(keys)} keys")
+        {:ok, keys}
+
+      {:error, :not_found} ->
+        IO.puts("DEBUG: list_enrolled - not_found, returning []")
+        {:ok, []}
+
+      error ->
+        IO.puts("DEBUG: list_enrolled - error: #{inspect(error)}")
+        error
     end
   end
 
@@ -308,9 +221,13 @@ defmodule Crispkey.FIDO2.Client do
 
   defp load_wrapped_keys do
     path = wrapped_key_path()
+    IO.puts("DEBUG: load_wrapped_keys path: #{path}")
+    IO.puts("DEBUG: load_wrapped_keys file exists?: #{File.exists?(path)}")
 
     case File.read(path) do
       {:ok, data} ->
+        IO.puts("DEBUG: load_wrapped_keys file read succeeded, size: #{byte_size(data)}")
+
         case CBOR.decode(data) do
           {:ok, map, _rest} when is_map(map) ->
             keys =
@@ -332,7 +249,11 @@ defmodule Crispkey.FIDO2.Client do
 
           _ ->
             case Jason.decode(data) do
-              {:ok, map} ->
+              {:ok, %{"keys" => keys_list}} when is_list(keys_list) ->
+                keys = Enum.map(keys_list, &build_wrapped_key/1)
+                {:ok, keys}
+
+              {:ok, map} when is_map(map) ->
                 key = %Types.WrappedKey{
                   credential_id: Base.decode64!(map["credential_id"]),
                   public_key: Base.decode64!(map["public_key"]),
